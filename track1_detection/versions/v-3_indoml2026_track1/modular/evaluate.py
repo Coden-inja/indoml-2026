@@ -197,3 +197,86 @@ def sweep_postprocessing(cache, ref, verbose=True):
                   f"{r[6]:6.2f}{r[7]:7.3f}{r[8]:7.3f}")
     best = (results[0][3], results[0][4], results[0][5], results[0][6])
     return best, results
+
+
+# ---------------------------------------------------------------------------
+# Faithful Whole-Clip Validation (Matching Codabench Leaderboard Exactly)
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def cache_faithful_posteriors(model, val_rows, device, sr=16000):
+    """Run model on WHOLE uncropped audio for all validation rows and cache posteriors
+    alongside the TRUE raw ground-truth spans (no rasterization, no 5s crop).
+    """
+    model.eval()
+    from inference import t1_posteriors
+
+    cache = []
+    for r in val_rows:
+        cid = r.get("clip_id") or f"c_{len(cache)}"
+        # Convert int16 wav back to float32
+        wav = (r["wav"].astype(np.float32) / 32767.0)
+        dur = len(wav) / sr
+        raw_spans = [tuple(sp) for sp in r.get("raw_spans", [])]
+
+        post, cp = t1_posteriors(wav, model, device, sr)
+        cache.append({
+            "cid": cid,
+            "post": post[0].copy(),  # Channel 0: any noise
+            "cp": float(cp),
+            "dur": float(dur),
+            "ref": raw_spans,
+        })
+    return cache
+
+
+def score_faithful_cached(cache, thr=0.5, med=7, min_dur=0.05, merge_gap=0.10, clip_gate=0.0):
+    """Score whole-clip predictions against raw ground-truth spans."""
+    ref_dict = {}
+    pred_dict = {}
+
+    for item in cache:
+        cid = item["cid"]
+        dur = item["dur"]
+        ref_dict[cid] = item["ref"]
+
+        if item["cp"] < clip_gate:
+            pred_dict[cid] = []
+        else:
+            raw_evs = prob_to_events(item["post"], thr=thr, med=med, min_dur=min_dur, merge_gap=merge_gap)
+            valid_evs = []
+            for on, off in raw_evs:
+                on = max(0.0, on)
+                off = min(dur, off)
+                if off - on >= 0.05:
+                    valid_evs.append((round(float(on), 3), round(float(off), 3)))
+            pred_dict[cid] = valid_evs
+
+    f1, prec, rec, tp, fp, fn = event_based_f1(ref_dict, pred_dict)
+    dice = segment_dice(ref_dict, pred_dict)
+    return dict(f1=f1, dice=dice, score=f1 + dice, precision=prec, recall=rec, tp=tp, fp=fp, fn=fn)
+
+
+def sweep_faithful_postprocessing(cache, verbose=True):
+    """Grid-search post-processing over faithful whole-clip posteriors."""
+    results = []
+    # Test fine-grained thresholds
+    for thr in [0.25, 0.35, 0.45, 0.50, 0.55, 0.65]:
+        for med in [1, 3, 5, 7, 11]:
+            # Keep min_dur small (0.05 or 0.10) to avoid destroying human_non_speech bursts!
+            for min_dur in [0.05, 0.10, 0.20]:
+                for gate in [0.0, 0.2, 0.4]:
+                    m = score_faithful_cached(cache, thr=thr, med=med, min_dur=min_dur, clip_gate=gate)
+                    results.append((m["score"], m["f1"], m["dice"], thr, med, min_dur,
+                                    gate, m["precision"], m["recall"]))
+
+    results.sort(reverse=True)
+    if verbose:
+        print("\n--- FAITHFUL WHOLE-CLIP VALIDATION SWEEP ---")
+        print(f"{'Comb':>7}{'F1':>7}{'Dice':>7}{'thr':>6}{'med':>5}"
+              f"{'mind':>7}{'gate':>6}{'P':>7}{'R':>7}")
+        for r in results[:10]:
+            print(f"{r[0]:7.4f}{r[1]:7.3f}{r[2]:7.3f}{r[3]:6.2f}{r[4]:5d}{r[5]:7.2f}"
+                  f"{r[6]:6.2f}{r[7]:7.3f}{r[8]:7.3f}")
+    best = (results[0][3], results[0][4], results[0][5], results[0][6])
+    return best, results[0]
+

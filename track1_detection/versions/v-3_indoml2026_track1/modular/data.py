@@ -190,11 +190,28 @@ def build_rows(raw, max_per_quality, verbose: bool = True):
         spans = spans_from(ex)
         has_strong = q in ("verified_timestamps", "unverified_timestamps")
         nf = 1 + len(wav) // CFG["hop"]
+        dur_sec = len(wav) / CFG["sr"]
+        is_whole_clip = any(sp[0] <= 0.05 and sp[1] >= (dur_sec - 0.05) for sp in spans) if has_strong else False
+
+        # Apply downweighting: Silver whole-clip events are mostly lazy annotations
+        if q == "verified_timestamps":
+            sample_w = 1.0
+        elif q == "unverified_timestamps":
+            sample_w = 0.1 if is_whole_clip else float(CFG["silver_weight"])
+        else:
+            sample_w = 0.2
+
         rows.append(dict(
             wav=(np.clip(wav, -1, 1) * 32767).astype(np.int16),
             lab=build_labels(spans, nf, has_strong),
             tags=clip_tags(ex),
-            quality=q, has_strong=bool(has_strong),
+            quality=q,
+            has_strong=bool(has_strong),
+            district=str(ex.get("district", "")),
+            raw_spans=[(float(sp[0]), float(sp[1])) for sp in spans],
+            clip_id=str(ex.get("imageFileName", f"clip_{i}")),
+            weight=sample_w,
+            is_whole_clip=is_whole_clip,
         ))
         counts_done[q] += 1
 
@@ -295,29 +312,60 @@ class SEDData(Dataset):
             tags=torch.from_numpy(tags),
             mask=torch.from_numpy(mask),
             strong=torch.tensor(strong, dtype=torch.float32),
-            w=torch.tensor(float(QW.get(m["quality"], 1.0)), dtype=torch.float32),
+            w=torch.tensor(float(m.get("weight", QW.get(m["quality"], 1.0))), dtype=torch.float32),
         )
 
 
-def split_and_load(gold, silver, bronze, t1_bs, train_limit=None, verbose=True):
-    """Build the train/val DataLoaders.
+def split_and_load(
+    gold,
+    silver,
+    bronze,
+    t1_bs,
+    train_limit=None,
+    split_by="district",
+    val_districts=None,
+    verbose=True,
+):
+    """Build the train/val DataLoaders and return val_rows for whole-clip evaluation.
 
-    The validation set is gold-only (the only trustworthy strong labels). Everything
-    else (leftover gold + all silver + all bronze) trains. `train_limit` optionally
-    caps the training set for smoke runs.
+    If `split_by="district"`, holds out entire districts from Gold to guarantee zero
+    speaker leakage (matching the competition's held-out test distribution).
     """
-    random.Random(CFG["seed"]).shuffle(gold)
-    n_val = max(1, int(len(gold) * CFG["val_frac"]))
-    val_rows = gold[:n_val]
-    train_rows = gold[n_val:] + silver + bronze
+    if split_by == "district":
+        if val_districts is None:
+            # Representative holdout districts from Gold (~10-15% of Gold clips)
+            val_districts = {"Bhopal", "Unakoti", "Katni", "Dhar"}
+        else:
+            val_districts = set(val_districts)
+
+        val_rows = [r for r in gold if r.get("district") in val_districts]
+        train_gold = [r for r in gold if r.get("district") not in val_districts]
+
+        # Fallback if none of the districts appear in a small debug run
+        if len(val_rows) == 0:
+            if verbose:
+                print(f"[WARN] No gold clips found in {val_districts}. Falling back to random 10% split.")
+            random.Random(CFG["seed"]).shuffle(gold)
+            n_val = max(1, int(len(gold) * CFG["val_frac"]))
+            val_rows = gold[:n_val]
+            train_gold = gold[n_val:]
+        elif verbose:
+            print(f"[INFO] District-disjoint validation: {len(val_rows)} clips held out from districts: {sorted(val_districts)}")
+    else:
+        random.Random(CFG["seed"]).shuffle(gold)
+        n_val = max(1, int(len(gold) * CFG["val_frac"]))
+        val_rows = gold[:n_val]
+        train_gold = gold[n_val:]
+
+    train_rows = train_gold + silver + bronze
     random.Random(CFG["seed"]).shuffle(train_rows)
     if train_limit is not None:
         train_rows = train_rows[:train_limit]
     if verbose:
-        print(f"train {len(train_rows)} | val {len(val_rows)} (gold only)")
+        print(f"train {len(train_rows)} | val {len(val_rows)} (gold only, disjoint)")
 
     train_dl = DataLoader(SEDData(train_rows, True), batch_size=t1_bs, shuffle=True,
                           num_workers=CFG["num_workers"], drop_last=True, pin_memory=True)
     val_dl = DataLoader(SEDData(val_rows, False), batch_size=t1_bs, shuffle=False,
                         num_workers=CFG["num_workers"], pin_memory=True)
-    return train_dl, val_dl
+    return train_dl, val_dl, val_rows
