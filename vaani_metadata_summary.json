@@ -1,0 +1,260 @@
+{
+  "tier_summary": {
+    "no_timestamps": {
+      "clips": 169,
+      "hours": 0.23261938083333336,
+      "mean_dur_sec": 4.955205745562131,
+      "med_dur_sec": 4.718999999999999,
+      "min_dur_sec": 2.049999999999999,
+      "max_dur_sec": 13.191
+    },
+    "unverified_timestamps": {
+      "clips": 1447,
+      "hours": 2.3982186725,
+      "mean_dur_sec": 5.966542654457498,
+      "med_dur_sec": 5.519,
+      "min_dur_sec": 1.12,
+      "max_dur_sec": 18.03
+    },
+    "verified_timestamps": {
+      "clips": 875,
+      "hours": 1.363185100833333,
+      "mean_dur_sec": 5.608532986285714,
+      "med_dur_sec": 5.244,
+      "min_dur_sec": 1.275999999999999,
+      "max_dur_sec": 23.486
+    }
+  },
+  "gold_category_summary": {
+    "human_non_speech": {
+      "count": 536,
+      "hours": 0.05140055555555555,
+      "pct_time": 13.227035929342193,
+      "mean_dur": 0.34522761194029844,
+      "median_dur": 0.3325,
+      "p90_dur": 0.491
+    },
+    "vehicle_traffic": {
+      "count": 323,
+      "hours": 0.07797722222222221,
+      "pct_time": 20.0660772798234,
+      "mean_dur": 0.8690959752321981,
+      "median_dur": 0.6299999999999999,
+      "p90_dur": 1.6231999999999998
+    },
+    "animal": {
+      "count": 313,
+      "hours": 0.14397916666666669,
+      "pct_time": 37.05052581617305,
+      "mean_dur": 1.6559904153354634,
+      "median_dur": 0.6829999999999998,
+      "p90_dur": 5.086400000000001
+    },
+    "baby_child": {
+      "count": 178,
+      "hours": 0.05518388888888888,
+      "pct_time": 14.200610735913893,
+      "mean_dur": 1.116078651685393,
+      "median_dur": 0.6825000000000001,
+      "p90_dur": 2.330900000000003
+    },
+    "phone_signal_alarm": {
+      "count": 73,
+      "hours": 0.015049444444444442,
+      "pct_time": 3.8727118847607636,
+      "mean_dur": 0.7421643835616437,
+      "median_dur": 0.5539999999999994,
+      "p90_dur": 1.367
+    },
+    "singing_music": {
+      "count": 20,
+      "hours": 0.030300833333333332,
+      "pct_time": 7.797390647963351,
+      "mean_dur": 5.45415,
+      "median_dur": 4.8995,
+      "p90_dur": 9.453800000000003
+    },
+    "appliance_machine": {
+      "count": 11,
+      "hours": 0.01471111111111111,
+      "pct_time": 3.785647706023295,
+      "mean_dur": 4.8145454545454545,
+      "median_dur": 5.125,
+      "p90_dur": 6.54
+    }
+  },
+  "gold_overlaps": {
+    "total_clips": 875,
+    "total_events": 1454,
+    "total_merged_events": 1306,
+    "events_lost_to_union_merging": 148,
+    "merge_loss_pct": 10.178817056396149,
+    "clips_with_overlaps": 104,
+    "overlap_clip_pct": 11.885714285714286,
+    "clips_with_nested": 84,
+    "nested_clip_pct": 9.6,
+    "total_nested_events": 127,
+    "whole_clip_events": 70,
+    "whole_clip_event_pct": 4.814305364511692
+  },
+  "silver_overlaps": {
+    "total_clips": 1447,
+    "total_events": 2009,
+    "total_merged_events": 1685,
+    "events_lost_to_union_merging": 324,
+    "merge_loss_pct": 16.127426580388253,
+    "clips_with_overlaps": 246,
+    "overlap_clip_pct": 17.000691085003456,
+    "clips_with_nested": 231,
+    "nested_clip_pct": 15.964063579820317,
+    "total_nested_events": 317,
+    "whole_clip_events": 682,
+    "whole_clip_event_pct": 33.947237431557994
+  },
+  "union_oracle": {
+    "event_f1": 0.9405797101449276,
+    "precision": 0.9938744257274119,
+    "recall": 0.8927097661623109,
+    "segment_dice": 1.0,
+    "combined_score": 1.9405797101449276,
+    "tp": 1298,
+    "fp": 8,
+    "fn": 156
+  },
+  "jitter_sensitivity": {
+    "10ms": {
+      "f1": 1.0,
+      "dice": 0.9906586885987194,
+      "combined": 1.9906586885987194
+    },
+    "20ms": {
+      "f1": 1.0,
+      "dice": 0.9813447189135672,
+      "combined": 1.9813447189135673
+    },
+    "40ms": {
+      "f1": 1.0,
+      "dice": 0.9606206060682768,
+      "combined": 1.960620606068277
+    },
+    "50ms": {
+      "f1": 0.9993122420907841,
+      "dice": 0.9503809565922342,
+      "combined": 1.9496931986830184
+    },
+    "80ms": {
+      "f1": 0.8184319119669876,
+      "dice": 0.9187437521720697,
+      "combined": 1.7371756641390572
+    },
+    "100ms": {
+      "f1": 0.6966987620357634,
+      "dice": 0.9021354468731211,
+      "combined": 1.5988342089088845
+    }
+  },
+  "gold_districts": [
+    {
+      "district": "WestTripura",
+      "count": 184,
+      "sum": 1048.0255,
+      "hours": 0.2911181944444444
+    },
+    {
+      "district": "Bhopal",
+      "count": 153,
+      "sum": 795.637834,
+      "hours": 0.22101050944444445
+    },
+    {
+      "district": "Unakoti",
+      "count": 125,
+      "sum": 731.15125,
+      "hours": 0.20309756944444446
+    },
+    {
+      "district": "Katni",
+      "count": 119,
+      "sum": 712.51,
+      "hours": 0.19791944444444445
+    },
+    {
+      "district": "Dhar",
+      "count": 97,
+      "sum": 566.957166,
+      "hours": 0.15748810166666669
+    },
+    {
+      "district": "Dhalai",
+      "count": 83,
+      "sum": 461.286625,
+      "hours": 0.12813517361111113
+    },
+    {
+      "district": "Umaria",
+      "count": 40,
+      "sum": 214.49,
+      "hours": 0.05958055555555556
+    },
+    {
+      "district": "Hyderabad",
+      "count": 39,
+      "sum": 190.562,
+      "hours": 0.05293388888888889
+    },
+    {
+      "district": "SouthTripura",
+      "count": 8,
+      "sum": 43.821999999999996,
+      "hours": 0.012172777777777777
+    },
+    {
+      "district": "Mahabubabad",
+      "count": 8,
+      "sum": 44.201,
+      "hours": 0.012278055555555556
+    },
+    {
+      "district": "NewDelhi",
+      "count": 6,
+      "sum": 31.116988,
+      "hours": 0.008643607777777777
+    },
+    {
+      "district": "Dimapur",
+      "count": 5,
+      "sum": 34.202,
+      "hours": 0.009500555555555555
+    },
+    {
+      "district": "Adilabad",
+      "count": 2,
+      "sum": 5.783999999999999,
+      "hours": 0.0016066666666666664
+    },
+    {
+      "district": "Khordha",
+      "count": 2,
+      "sum": 8.762,
+      "hours": 0.002433888888888889
+    },
+    {
+      "district": "CoochBehar",
+      "count": 2,
+      "sum": 5.649999999999999,
+      "hours": 0.001569444444444444
+    },
+    {
+      "district": "Nuapada",
+      "count": 1,
+      "sum": 4.020000000000001,
+      "hours": 0.001116666666666667
+    },
+    {
+      "district": "Malkangiri",
+      "count": 1,
+      "sum": 9.288,
+      "hours": 0.0025800000000000003
+    }
+  ]
+}
