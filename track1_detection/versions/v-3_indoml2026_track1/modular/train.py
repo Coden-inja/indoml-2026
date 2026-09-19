@@ -81,10 +81,10 @@ def run_epochs(stu, tea, opt, sched, epochs, scaler, train_dl, val_dl, device,
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(stu.parameters(), 5.0)
+            scale_before = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
-            if sched is not None:
+            if sched is not None and scaler.get_scale() >= scale_before:
                 sched.step()
 
             state["gstep"] += 1

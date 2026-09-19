@@ -1,0 +1,17 @@
+{
+  "budget": "fast",
+  "split": "district",
+  "val_clips": 68,
+  "train_clips": 100,
+  "combined_score": 0.4705,
+  "event_f1": 0.086,
+  "segment_dice": 0.3845,
+  "precision": 0.1176,
+  "recall": 0.0678,
+  "optimal_postproc": {
+    "threshold": 0.55,
+    "median_filter": 11,
+    "min_duration": 0.2,
+    "clip_gate": 0.4
+  }
+}

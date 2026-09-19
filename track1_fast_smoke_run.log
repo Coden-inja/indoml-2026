@@ -1,0 +1,73 @@
+======================================================================
+INDOML 2026 TRACK 1: WAVLM SED TRAINING & FAITHFUL EVALUATION
+Budget: fast | Split: district
+======================================================================
+[INFO] Running on compute device: CUDA
+[INFO] Budget Settings: Stage1=3 eps, Stage2=8 eps, BatchSize=16
+[INFO] Tier Caps: {'verified_timestamps': 132, 'unverified_timestamps': 132, 'no_timestamps': 132} | Train Limit: 100
+
+--- 1. STREAMING & DECODING DATASET ---
+README.md: 7.87kB [00:00, 17.1MB/s]
+Resolving data files: 100%|████████████████| 182/182 [00:00<00:00, 30217.85it/s]
+Resolving data files: 100%|████████████████| 182/182 [00:00<00:00, 27287.34it/s]
+loading: 1617it [00:36, 44.02it/s]
+{'verified_timestamps': 132, 'unverified_timestamps': 132, 'no_timestamps': 132} | 396 rows | 0.6 min
+
+--- 2. CREATING SPLIT & DATALOADERS ---
+gold 132 | silver 132 | bronze 132
+[INFO] District-disjoint validation: 68 clips held out from districts: ['Bhopal', 'Dhar', 'Katni', 'Unakoti']
+train 100 | val 68 (gold only, disjoint)
+
+--- 3. STARTING TWO-STAGE MEAN-TEACHER TRAINING ---
+config.json: 2.23kB [00:00, 6.69MB/s]
+pytorch_model.bin: 100%|██████████████████████| 378M/378M [00:02<00:00, 143MB/s]
+Loading weights: 100%|█| 248/248 [00:00<00:00, 3215.38it/s, Materializing param=
+model.safetensors: 100%|██████████████████████| 378M/378M [00:02<00:00, 188MB/s]
+
+=== stage 1: encoder frozen, 3 epochs ===
+s1 ep00 [0.2m] s 0.993 w 1.037 c 0.019 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034 saved student 0.5034
+s1 ep01 [0.1m] s 0.784 w 0.819 c 0.026 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s1 ep02 [0.1m] s 0.823 w 0.965 c 0.015 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+
+=== stage 2: unfrozen, enc lr 5e-05, 8 epochs ===
+s2 ep00 [0.1m] s 0.854 w 0.774 c 0.015 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep01 [0.1m] s 0.811 w 0.840 c 0.009 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep02 [0.1m] s 0.820 w 0.755 c 0.011 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep03 [0.1m] s 0.762 w 0.843 c 0.015 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep04 [0.1m] s 0.722 w 0.693 c 0.012 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep05 [0.1m] s 0.726 w 0.789 c 0.011 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep06 [0.1m] s 0.795 w 0.737 c 0.010 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+s2 ep07 [0.1m] s 0.695 w 0.814 c 0.009 | stu 0.5034 (F1 0.113 D 0.390) | tea 0.5034
+best Combined: 0.5034268367370551 / 2.0
+
+--- 4. FAITHFUL WHOLE-CLIP VALIDATION EVALUATION ---
+Loading weights: 100%|█| 248/248 [00:00<00:00, 2596.81it/s, Materializing param=
+[INFO] Running whole-clip inference over 68 validation clips...
+
+--- FAITHFUL WHOLE-CLIP VALIDATION SWEEP ---
+   Comb     F1   Dice   thr  med   mind   gate      P      R
+ 0.4705  0.086  0.385  0.55   11   0.20   0.40  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.20   0.20  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.20   0.00  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.10   0.40  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.10   0.20  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.10   0.00  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.05   0.40  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.05   0.20  0.118  0.068
+ 0.4705  0.086  0.385  0.55   11   0.05   0.00  0.118  0.068
+ 0.4705  0.086  0.385  0.55    7   0.20   0.40  0.118  0.068
+
+======================================================================
+              FINAL FAITHFUL VALIDATION RESULTS
+======================================================================
+  Combined Score:  0.4705 / 2.0000
+  Event F1:        0.0860  (Precision: 0.1176, Recall: 0.0678)
+  Segment Dice:    0.3845
+  Optimal Post-Processing Parameters:
+    - Threshold:    0.55
+    - Median Filter:11
+    - Min Duration: 0.2s
+    - Clip Gate:    0.4
+======================================================================
+[INFO] Metrics written to track1_val_metrics.json
+[INFO] Best model checkpoint saved to /kaggle/working/indoml-2026/t1_wavlm_best.pt

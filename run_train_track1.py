@@ -147,6 +147,30 @@ def main():
         json.dump(metrics, f, indent=2)
     print(f"[INFO] Metrics written to {metrics_file}")
 
+    # Generate clean markdown report
+    report_file = Path("track1_val_report.md")
+    report_md = f"""# IndoML 2026 Track 1 Validation Report
+- **Budget Profile:** `{args.budget}`
+- **Validation Split:** `{args.split}` ({len(val_rows)} clips)
+- **Held-Out Districts:** `{args.val_districts if args.split == 'district' else 'Random 10%'}`
+
+## Faithful Validation Results
+| Metric | Score |
+|---|---|
+| **Combined Score** | **{best_result[0]:.4f}** / 2.0000 |
+| **Event F1** | **{best_result[1]:.4f}** (P: {best_result[7]:.4f}, R: {best_result[8]:.4f}) |
+| **Segment Dice** | **{best_result[2]:.4f}** |
+
+## Optimal Post-Processing Parameters
+- **Probability Threshold:** `{best_thr}`
+- **Median Filter Size:** `{best_med}`
+- **Minimum Duration:** `{best_min_dur}s`
+- **Clip Gate:** `{best_gate}`
+"""
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write(report_md)
+    print(f"[INFO] Formatted markdown report written to {report_file}")
+
     ck.update({
         "thr": float(best_thr),
         "med": int(best_med),
@@ -156,6 +180,42 @@ def main():
     })
     torch.save(ck, ckpt_path)
     print(f"[INFO] Best model checkpoint saved to {ckpt_path.resolve()}")
+
+    # 5. Auto-push results to GitHub if GH_TOKEN is available
+    auto_push_results(args.budget)
+
+
+def auto_push_results(budget: str):
+    """Automatically commit and push validation metrics and report to GitHub."""
+    import subprocess
+
+    try:
+        from kaggle_secrets import UserSecretsClient
+        gh_tok = UserSecretsClient().get_secret("GH_TOKEN")
+    except Exception:
+        gh_tok = os.environ.get("GH_TOKEN")
+
+    if not gh_tok:
+        print("[INFO] No GH_TOKEN found; skipping git auto-push.")
+        return
+
+    print("\n--- 5. AUTO-PUSHING RESULTS TO GITHUB ---")
+    repo_url = f"https://{gh_tok}@github.com/Coden-inja/indoml-2026.git"
+
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", "yogesh kumar"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "fbyogesh111@gmail.com"], check=True)
+        subprocess.run(["git", "remote", "set-url", "origin", repo_url], check=True)
+
+        files_to_add = ["track1_val_metrics.json", "track1_val_report.md"]
+        subprocess.run(["git", "add"] + files_to_add, check=True)
+        subprocess.run(["git", "commit", "-m", f"Auto-push: Track 1 validation report ({budget})"], check=True)
+        subprocess.run(["git", "push", "origin", "main"], check=True)
+        print("[SUCCESS] Validation report and metrics automatically pushed to GitHub!")
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] Git auto-push encountered an issue: {e}")
+    except Exception as e:
+        print(f"[WARN] Could not auto-push to GitHub: {e}")
 
 
 if __name__ == "__main__":
