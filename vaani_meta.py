@@ -227,12 +227,18 @@ def load_all_metadata(
     hf_token: Optional[str],
     num_shards: Optional[int] = None,
     save_cache_path: str = "vaani_metadata.parquet",
+    force: bool = False,
 ) -> pd.DataFrame:
     """Reads metadata columns from HF parquet shards via byte-range requests."""
     # Check if cached locally first
-    if os.path.exists(save_cache_path):
-        print(f"[INFO] Found local cache: {save_cache_path}. Loading...")
-        return pd.read_parquet(save_cache_path)
+    if os.path.exists(save_cache_path) and not force:
+        cached_df = pd.read_parquet(save_cache_path)
+        # If full run is requested (num_shards is None) but cache only has test subset (<50k rows)
+        if num_shards is None and len(cached_df) < 50000:
+            print(f"[INFO] Existing cache has only {len(cached_df):,} test clips. Re-fetching all shards for full audit...")
+        else:
+            print(f"[INFO] Found local cache: {save_cache_path} ({len(cached_df):,} clips). Loading...")
+            return cached_df
 
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
@@ -538,10 +544,11 @@ def main():
     parser = argparse.ArgumentParser(description="Vaani Noise Event Dataset Metadata Audit")
     parser.add_argument("--num-shards", type=int, default=None, help="Number of shards to inspect (default: all 183)")
     parser.add_argument("--cache-path", type=str, default="vaani_metadata.parquet", help="Path to cache metadata parquet")
+    parser.add_argument("--force", action="store_true", help="Force re-reading all shards even if cache exists")
     args = parser.parse_args()
 
     tok = get_hf_token()
-    df = load_all_metadata(hf_token=tok, num_shards=args.num_shards, save_cache_path=args.cache_path)
+    df = load_all_metadata(hf_token=tok, num_shards=args.num_shards, save_cache_path=args.cache_path, force=args.force)
     run_analysis(df)
 
 
