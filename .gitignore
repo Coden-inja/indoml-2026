@@ -1,15 +1,68 @@
 # Byte-compiled / optimized files
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
+build/
+dist/
 
-# macOS
+# Operating System
 .DS_Store
+Thumbs.db
+desktop.ini
 
-# Model checkpoints / large artefacts
-*.pt
-*.ckpt
-*.zip
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # Jupyter
 .ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Environment & Secrets
+.env
+.env.*
+*.token
+*.secret
+kaggle.json
+
+# Model weights & Checkpoints
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+checkpoints/
+weights/
+saved_models/
+
+# Audio, Parquet & Large Data files
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.parquet
+*.feather
+*.h5
+*.hdf5
+data/
+datasets/
+input_data/
+audio_cache/
+cache/
+
+# Experiment outputs & logs
+runs/
+outputs/
+logs/
+wandb/
+
+# Archives (except final submission zip if created manually, but keeping general zips ignored)
+*.tar.gz
+*.tar
+*.zip
+*.rar
