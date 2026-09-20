@@ -170,15 +170,16 @@ class PureGPU_CRNN(nn.Module):
 
     def forward(self, wav, target_len=FRAMES_OUT, mask=None):
         # wav: (B, N_SAMP)
-        # 1. Log-Mel on GPU
-        mel = self.melspec(wav)  # (B, n_mels, T)
-        mel = torch.log(mel + 1e-6)
-        # Normalize per clip
-        mean = mel.mean(dim=(-2, -1), keepdim=True)
-        std = mel.std(dim=(-2, -1), keepdim=True).clamp(min=1e-3)
-        mel = (mel - mean) / std
+        # 1. Log-Mel on GPU strictly in FLOAT32 (PyTorch STFT overflows in FP16 autocast!)
+        with torch.amp.autocast("cuda", enabled=False):
+            wav_f32 = wav.float()
+            mel = self.melspec(wav_f32)  # (B, n_mels, T)
+            mel = torch.log(mel + 1e-6)
+            mean = mel.mean(dim=(-2, -1), keepdim=True)
+            std = mel.std(dim=(-2, -1), keepdim=True).clamp(min=1e-3)
+            mel = (mel - mean) / std
 
-        # 2. CNN forward
+        # 2. CNN forward (safe in mixed precision)
         x = mel.unsqueeze(1)       # (B, 1, n_mels, T)
         x = self.cnn(x).squeeze(2) # (B, 256, T')
         x = x.transpose(1, 2)      # (B, T', 256)
@@ -426,10 +427,27 @@ def main():
     train_dl = DataLoader(LocalSedDataset(train_samples, train=True), batch_size=args.batch_size, shuffle=True, num_workers=2, drop_last=True)
     val_dl = DataLoader(LocalSedDataset(val_samples, train=False), batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 3. Instantiate and Train CRNN_SED
-    print("\n[INFO] Initializing CRNN_SED dual-branch network...")
+    # 3. Instantiate and Sanity-Check CRNN_SED
+    print("\n[INFO] Initializing Pure-GPU Audio CRNN...")
     model = CRNN_SED(n_out=N_OUT).to(device)
-    model = train_crnn(model, train_dl, val_dl, device, epochs=args.epochs, lr=3e-4)
+
+    # 3-Second Numerical Sanity Check on Batch 1
+    print("[INFO] Running 3-second numerical sanity check on 1 batch...")
+    test_batch = next(iter(train_dl))
+    w_test = test_batch["wav"].to(device)
+    l_test = test_batch["lab"].to(device)
+    m_test = test_batch["mask"].to(device)
+    with torch.no_grad():
+        test_logits, test_cp = model(w_test, target_len=FRAMES_OUT, mask=m_test)
+        test_loss = robust_bce_loss(test_logits, l_test, m_test)
+    has_nan = torch.isnan(test_logits).any().item() or torch.isnan(test_loss).item()
+    print(f"  --> Logits shape: {tuple(test_logits.shape)} | Loss: {test_loss.item():.4f} | Has NaN: {has_nan}")
+    if has_nan:
+        print("[FATAL ERROR] Sanity check failed with NaN! Halting immediately.")
+        return
+    print("  --> Numerical Sanity Check: PASSED! Proceeding to training.\n")
+
+    model = train_crnn(model, train_dl, val_dl, device, epochs=args.epochs, lr=5e-4)
 
     # Save model weights
     torch.save({"model": model.state_dict()}, "t1_crnn_sed.pt")
