@@ -99,13 +99,22 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
-    # 1. Load Trained MaskNet Checkpoint
+    # 1. Load Trained MaskNet Checkpoint (Auto-detects ComplexMaskNet or BiGRUMaskNet)
     assert os.path.exists(args.ckpt), f"Checkpoint not found at {args.ckpt}"
     ckpt_data = torch.load(args.ckpt, map_location=device)
-    model = BiGRUMaskNet().to(device)
+    if "hidden_size" in ckpt_data:
+        from train_complex_masknet import ComplexMaskNet
+        model = ComplexMaskNet(
+            hidden_size=ckpt_data["hidden_size"],
+            num_layers=ckpt_data["num_layers"],
+        ).to(device)
+        print(f"[INFO] Initialized ComplexMaskNet (hidden={ckpt_data['hidden_size']}, layers={ckpt_data['num_layers']})")
+    else:
+        model = BiGRUMaskNet().to(device)
+        print("[INFO] Initialized BiGRUMaskNet")
     model.load_state_dict(ckpt_data["model_state_dict"])
     model.eval()
-    print(f"[INFO] Loaded MaskNet checkpoint from {args.ckpt} (SI-SDR: {ckpt_data.get('val_si_sdr', 'N/A'):.2f} dB)")
+    print(f"[INFO] Loaded checkpoint from {args.ckpt} (SI-SDR: {ckpt_data.get('val_si_sdr', 'N/A'):.2f} dB)")
 
     # 2. Load Track 1 Event Predictions
     t1_events = {}
