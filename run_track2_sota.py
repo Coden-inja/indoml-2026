@@ -38,6 +38,16 @@ try:
 except ImportError:
     pass
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    import soundfile as sf
+except ImportError:
+    sf = None
+
 AUD = (".wav", ".flac", ".mp3", ".ogg")
 TARGET_SR = 16000
 WAV_SUBTYPE = "PCM_16"
@@ -353,7 +363,13 @@ def main():
     print("      INDOML 2026 TRACK 2: SOTA EVENT-GATED ENHANCEMENT & SUBMISSION")
     print("=" * 75)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    global torch
+    if torch is None:
+        try:
+            import torch
+        except ImportError:
+            pass
+    device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
     print(f"[INFO] Compute Device: {device.upper()}")
     if device == "cpu":
         print("[WARN] Running on CPU! For fast SraVaani transcription, use a GPU.")
