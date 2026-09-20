@@ -71,6 +71,7 @@ def main():
     parser.add_argument("--val-clips", type=int, default=150, help="Number of held-out validation clips to evaluate")
     parser.add_argument("--test-dir", type=str, default="/content/test_audio", help="Path to test audio directory")
     parser.add_argument("--output-zip", type=str, default="submission_track1_optimal.zip", help="Output zip name")
+    parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face API token")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -88,7 +89,38 @@ def main():
 
     # 1. Stream held-out validation data from HuggingFace
     print("\n--- 1. FETCHING HELD-OUT DISTRICT VALIDATION SET ---")
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = getattr(args, "hf_token", None)
+    if not hf_token:
+        try:
+            from google.colab import userdata
+            hf_token = userdata.get("HF_TOKEN")
+        except Exception:
+            pass
+    if not hf_token:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            hf_token = UserSecretsClient().get_secret("HF_TOKEN")
+        except Exception:
+            pass
+    if not hf_token:
+        hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        try:
+            from huggingface_hub import get_token
+            hf_token = get_token()
+        except Exception:
+            pass
+
+    if hf_token:
+        print("[INFO] Retrieved HF_TOKEN successfully.")
+        try:
+            from huggingface_hub import login
+            login(token=hf_token, add_to_git_credential=False)
+        except Exception:
+            pass
+    else:
+        print("[WARN] No HF_TOKEN detected! ARTPARK-IISc/Vaani-Noise-Event-Dataset is a gated dataset.")
+
     raw_stream = data.load_stream(hf_token)
     # Target district-disjoint holdouts
     val_districts = ["Bhopal", "Unakoti", "Katni", "Dhar"]
