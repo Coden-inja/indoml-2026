@@ -200,7 +200,8 @@ class CRNN_SED(nn.Module):
         self.att = nn.Linear(2 * rnn_dim, n_out)
 
     def forward(self, wav, target_len=FRAMES_OUT, mask=None):
-        seq = self.ast(wav)  # (B, t_seq, D)
+        with torch.no_grad():
+            seq = self.ast(wav)  # (B, t_seq, D)
         seq = F.interpolate(seq.transpose(1, 2), size=target_len, mode="linear", align_corners=False).transpose(1, 2)
         cnn = self.cnn(wav)  # (B, t_cnn, C)
         cnn = F.interpolate(cnn.transpose(1, 2), size=target_len, mode="linear", align_corners=False).transpose(1, 2)
@@ -220,22 +221,23 @@ class CRNN_SED(nn.Module):
 # 3. Loss & Training (Rock-solid Numerical Stability)
 # ---------------------------------------------------------------------------
 def robust_bce_loss(logits, target, mask, pos_weight=3.0):
-    pw = torch.tensor([pos_weight], device=logits.device, dtype=logits.dtype)
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw)
-    m = mask.unsqueeze(1).to(logits.device, dtype=logits.dtype)
+    pw = torch.tensor([pos_weight], device=logits.device, dtype=torch.float32)
+    bce = F.binary_cross_entropy_with_logits(logits.float(), target.float(), reduction="none", pos_weight=pw)
+    m = mask.unsqueeze(1).to(logits.device, dtype=torch.float32)
     loss = (bce * m).sum() / (m.sum() * target.shape[1] + 1e-6)
     return loss
 
 
-def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=2e-4):
-    opt = torch.optim.AdamW([
-        {"params": model.ast.parameters(), "lr": lr * 0.05},
-        {"params": model.cnn.parameters(), "lr": lr},
-        {"params": model.merge.parameters(), "lr": lr},
-        {"params": model.rnn.parameters(), "lr": lr},
-        {"params": model.strong.parameters(), "lr": lr},
-        {"params": model.att.parameters(), "lr": lr},
-    ], weight_decay=1e-2)
+def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=3e-4):
+    # Freeze 87M AST backbone - keep pretrained AudioSet features intact
+    for p in model.ast.backbone.parameters():
+        p.requires_grad = False
+    model.ast.backbone.eval()
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"[INFO] Trainable parameters (CNN + Head): {sum(p.numel() for p in trainable_params):,}")
+
+    opt = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
@@ -245,6 +247,7 @@ def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=2e-4):
     print(f"\n--- TRAINING CRNN_SED DUAL-BRANCH ({epochs} EPOCHS) ---")
     for epoch in range(1, epochs + 1):
         model.train()
+        model.ast.backbone.eval()
         total_loss, steps = 0.0, 0
         pbar = tqdm(train_dl, desc=f"Epoch {epoch}/{epochs} [Train]")
         for b in pbar:
@@ -258,19 +261,16 @@ def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=2e-4):
                     logits, clip_p = model(wav, target_len=FRAMES_OUT, mask=mask)
                     loss = robust_bce_loss(logits, lab, mask)
 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    continue
-
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 scaler.step(opt)
                 scaler.update()
             else:
                 logits, clip_p = model(wav, target_len=FRAMES_OUT, mask=mask)
                 loss = robust_bce_loss(logits, lab, mask)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 opt.step()
 
             total_loss += loss.item()
