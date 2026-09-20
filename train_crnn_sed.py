@@ -180,7 +180,9 @@ class CNNBranch(nn.Module):
         # wav: (B, N_SAMP)
         mel = self.melspec(wav)  # (B, n_mels, T)
         mel = torch.log(torch.clamp(mel, min=1e-5))
-        mel = (mel - mel.mean(dim=(-2, -1), keepdim=True)) / (mel.std(dim=(-2, -1), keepdim=True) + 1e-5)
+        std = mel.std(dim=(-2, -1), keepdim=True)
+        std = torch.clamp(std, min=1e-3)
+        mel = (mel - mel.mean(dim=(-2, -1), keepdim=True)) / std
         x = mel.unsqueeze(1)      # (B, 1, n_mels, T)
         x = self.net(x).squeeze(2)  # (B, out_ch, T')
         return x.transpose(1, 2)  # (B, T', out_ch)
@@ -208,28 +210,26 @@ class CRNN_SED(nn.Module):
         frame_logits = self.strong(h)  # (B, T, C)
         att = self.att(h)
         if mask is not None:
-            att = att.masked_fill(mask.unsqueeze(-1) < 0.5, -1e4)
-        att = torch.softmax(att, dim=1)
-        clip_prob = (torch.sigmoid(frame_logits) * att).sum(dim=1).clamp(1e-6, 1.0 - 1e-6)
+            att = att.masked_fill(mask.unsqueeze(-1) < 0.5, -100.0)
+        att = torch.softmax(att.float(), dim=1).type_as(att)
+        clip_prob = (torch.sigmoid(frame_logits) * att).sum(dim=1).clamp(1e-5, 1.0 - 1e-5)
         return frame_logits.transpose(1, 2), clip_prob  # (B, C, T), (B, C)
 
 
 # ---------------------------------------------------------------------------
-# 3. Loss & Training
+# 3. Loss & Training (Rock-solid Numerical Stability)
 # ---------------------------------------------------------------------------
-def focal_bce_loss(logits, target, mask, gamma=1.5, pos_weight=3.0):
-    pw = torch.tensor(pos_weight, device=logits.device, dtype=logits.dtype)
+def robust_bce_loss(logits, target, mask, pos_weight=3.0):
+    pw = torch.tensor([pos_weight], device=logits.device, dtype=logits.dtype)
     bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw)
-    prob = torch.sigmoid(logits)
-    pt = prob * target + (1.0 - prob) * (1.0 - target)
-    loss = bce * (1.0 - pt).pow(gamma)
     m = mask.unsqueeze(1).to(logits.device, dtype=logits.dtype)
-    return (loss * m).sum() / (m.sum() * target.shape[1] + 1e-6)
+    loss = (bce * m).sum() / (m.sum() * target.shape[1] + 1e-6)
+    return loss
 
 
-def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=3e-4):
+def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=2e-4):
     opt = torch.optim.AdamW([
-        {"params": model.ast.parameters(), "lr": lr * 0.1},
+        {"params": model.ast.parameters(), "lr": lr * 0.05},
         {"params": model.cnn.parameters(), "lr": lr},
         {"params": model.merge.parameters(), "lr": lr},
         {"params": model.rnn.parameters(), "lr": lr},
@@ -237,7 +237,7 @@ def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=3e-4):
         {"params": model.att.parameters(), "lr": lr},
     ], weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
     best_val_loss = float("inf")
     best_weights = None
@@ -253,15 +253,25 @@ def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=3e-4):
             mask = b["mask"].to(device)
 
             opt.zero_grad()
-            with torch.cuda.amp.autocast():
-                logits, clip_p = model(wav, target_len=FRAMES_OUT, mask=mask)
-                loss = focal_bce_loss(logits, lab, mask)
+            if scaler is not None:
+                with torch.amp.autocast("cuda"):
+                    logits, clip_p = model(wav, target_len=FRAMES_OUT, mask=mask)
+                    loss = robust_bce_loss(logits, lab, mask)
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(opt)
-            scaler.update()
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
+
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                logits, clip_p = model(wav, target_len=FRAMES_OUT, mask=mask)
+                loss = robust_bce_loss(logits, lab, mask)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                opt.step()
 
             total_loss += loss.item()
             steps += 1
@@ -278,9 +288,13 @@ def train_crnn(model, train_dl, val_dl, device, epochs=10, lr=3e-4):
                 wav = b["wav"].to(device)
                 lab = b["lab"].to(device)
                 mask = b["mask"].to(device)
-                with torch.cuda.amp.autocast():
+                if scaler is not None:
+                    with torch.amp.autocast("cuda"):
+                        logits, _ = model(wav, target_len=FRAMES_OUT, mask=mask)
+                        loss = robust_bce_loss(logits, lab, mask)
+                else:
                     logits, _ = model(wav, target_len=FRAMES_OUT, mask=mask)
-                    loss = focal_bce_loss(logits, lab, mask)
+                    loss = robust_bce_loss(logits, lab, mask)
                 val_loss += loss.item()
                 val_steps += 1
 
