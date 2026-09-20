@@ -355,6 +355,8 @@ def main():
                         help="Output submission ZIP filename")
     parser.add_argument("--batch-asr", type=int, default=8,
                         help="Batch size for SraVaani ASR transcription")
+    parser.add_argument("--hf-token", type=str, default=None,
+                        help="Hugging Face access token for gated models (SraVaani-1.0)")
     parser.add_argument("--max-clips", type=int, default=None,
                         help="Optional cap on number of clips (for testing)")
     args = parser.parse_args()
@@ -489,7 +491,7 @@ def main():
 
     # 5. Mandatory SraVaani ASR Transcription
     print("\n--- STEP 2: RUNNING MANDATORY SRAVAANI-1.0 ASR ---")
-    hf_token = get_hf_token()
+    hf_token = args.hf_token or get_hf_token()
     transcriber = SraVaaniTranscriber(hf_token=hf_token, device=device)
 
     transcript_dict = {}
