@@ -26,7 +26,8 @@ import torch
 import numpy as np
 from tqdm.auto import tqdm
 
-from config import CFG, WORK, FRAME_SEC, MIN_SAMPLES, AUD
+from config import CFG, WORK, FRAME_SEC, MIN_SAMPLES
+AUD = (".wav", ".flac", ".mp3", ".ogg")
 import data
 from model import WavLMSED
 from inference import t1_posteriors
