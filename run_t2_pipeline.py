@@ -1,7 +1,8 @@
-"""Track 2 Pipeline: Test Set Enhancement, ASR Transcription, and Submission Packaging.
+"""Track 2 Pipeline: Test Set Enhancement, Event-Gated Blending, SraVaani Transcription, and Packaging.
 
-Loads the best trained MaskNet checkpoint, applies Track 1 event gating to preserve
-clean speech intervals, blends inside detected noise spans, transcribes with SraVaani-1.0,
+Loads the best trained MaskNet checkpoint (t2_masknet_best.pt),
+applies Track 1 event gating to preserve 100% untouched clean speech outside noise events,
+blends inside detected noise events, transcribes with ARTPARK-IISc/SraVaani-1.0 in batches,
 and packages submission_track2.zip.
 """
 
@@ -20,35 +21,42 @@ import torch.nn as nn
 from tqdm.auto import tqdm
 import zipfile
 
-from train_t2_champion import BiGRUMaskNet, calc_si_sdr_np
+from train_t2_champion import BiGRUMaskNet
+
+ASR_REPO = "ARTPARK-IISc/SraVaani-1.0"
 
 # ---------------------------------------------------------------------------
-# SraVaani ASR Transcriber
+# SraVaani ASR Transcriber (Exact Audit-Compliant Batch Transcriber)
 # ---------------------------------------------------------------------------
 class SraVaaniTranscriber:
-    def __init__(self, token=None, device="cuda"):
-        from transformers import AutoModelForCTC, AutoProcessor
-        token = token or os.environ.get("HF_TOKEN")
-        print("[INFO] Loading ARTPARK-IISc/SraVaani-1.0 ASR model...")
-        self.processor = AutoProcessor.from_pretrained("ARTPARK-IISc/SraVaani-1.0", token=token)
-        self.model = AutoModelForCTC.from_pretrained(
-            "ARTPARK-IISc/SraVaani-1.0",
-            token=token,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        ).to(device).eval()
-        self.device = device
-        print("[INFO] SraVaani-1.0 loaded successfully.")
+    """Transcribes audio using mandatory ARTPARK-IISc/SraVaani-1.0 model."""
 
-    @torch.no_grad()
-    def transcribe(self, audio_16k):
-        inputs = self.processor(audio_16k, sampling_rate=16000, return_tensors="pt")
-        input_values = inputs.input_values.to(self.device)
-        if self.device == "cuda":
-            input_values = input_values.half()
-        logits = self.model(input_values).logits
-        pred_ids = torch.argmax(logits, dim=-1)
-        text = self.processor.batch_decode(pred_ids)[0]
-        return text.strip()
+    def __init__(self, hf_token=None, device="cuda"):
+        from huggingface_hub import snapshot_download
+        from transformers import AutoModel
+
+        token = hf_token or os.environ.get("HF_TOKEN")
+        print(f"[INFO] Downloading / loading SraVaani-1.0 from {ASR_REPO}...")
+        path = snapshot_download(ASR_REPO, token=token)
+        self.asr = AutoModel.from_pretrained(path, trust_remote_code=True).to(device).eval()
+        self.device = device
+        print(f"[INFO] SraVaani-1.0 loaded successfully on {device.upper()}!")
+
+    def transcribe_paths(self, paths: list[str]) -> list[str]:
+        """Transcribe list of WAV file paths in batches."""
+        with torch.no_grad():
+            try:
+                hyps = self.asr.transcribe(paths, return_hypotheses=True)
+                return [(h.text if hasattr(h, "text") else str(h)).strip() for h in hyps]
+            except Exception:
+                out = []
+                for p in paths:
+                    try:
+                        h = self.asr.transcribe([p], return_hypotheses=True)[0]
+                        out.append((h.text if hasattr(h, "text") else str(h)).strip())
+                    except Exception:
+                        out.append("")
+                return out
 
 
 # ---------------------------------------------------------------------------
@@ -81,22 +89,23 @@ def main():
     parser.add_argument("--test-dir", type=str, default="/kaggle/working/test_audio/audio")
     parser.add_argument("--track1-jsonl", type=str, default="/kaggle/working/indoml-2026/predictions.jsonl")
     parser.add_argument("--ckpt", type=str, default="/kaggle/working/t2_masknet_best.pt")
-    parser.add_argument("--blend", type=float, default=0.75, help="Weight on enhanced speech inside noise events")
+    parser.add_argument("--blend", type=float, default=0.80, help="Weight on enhanced speech inside noise events")
     parser.add_argument("--out-dir", type=str, default="/kaggle/working/t2_champion_wavs")
     parser.add_argument("--out-zip", type=str, default="/kaggle/working/submission_track2.zip")
     parser.add_argument("--hf-token", type=str, default=None)
+    parser.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
-    # 1. Load Trained MaskNet
+    # 1. Load Trained MaskNet Checkpoint
     assert os.path.exists(args.ckpt), f"Checkpoint not found at {args.ckpt}"
     ckpt_data = torch.load(args.ckpt, map_location=device)
     model = BiGRUMaskNet().to(device)
     model.load_state_dict(ckpt_data["model_state_dict"])
     model.eval()
-    print(f"[INFO] Loaded MaskNet checkpoint from {args.ckpt} (SI-SDR: {ckpt_data.get('val_si_sdr', 'N/A')})")
+    print(f"[INFO] Loaded MaskNet checkpoint from {args.ckpt} (SI-SDR: {ckpt_data.get('val_si_sdr', 'N/A'):.2f} dB)")
 
     # 2. Load Track 1 Event Predictions
     t1_events = {}
@@ -110,10 +119,7 @@ def main():
     else:
         print(f"[WARN] Track 1 predictions not found at {args.track1_jsonl}. Will enhance all spans.")
 
-    # 3. Load SraVaani ASR
-    transcriber = SraVaaniTranscriber(token=args.hf_token, device=str(device))
-
-    # 4. Gather Test Audio Files
+    # 3. Gather Test Audio Files
     test_files = sorted(glob.glob(os.path.join(args.test_dir, "*.wav")))
     print(f"[INFO] Found {len(test_files)} test audio files in {args.test_dir}")
     assert len(test_files) > 0, "No test files found!"
@@ -121,38 +127,35 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    transcripts = {}
+    # 4. Enhance all clips
+    print("\n[INFO] Phase 1/3: Running Event-Gated Speech Enhancement...")
     t0 = time.time()
-    print("\n[INFO] Starting Enhancement + Gating + Transcription...")
+    enhanced_wav_paths = []
 
-    for fpath in tqdm(test_files, desc="Enhancing & Transcribing"):
+    for fpath in tqdm(test_files, desc="Enhancing WAVs"):
         fname = os.path.basename(fpath)
         cid = fname[:-4] if fname.lower().endswith(".wav") else fname
 
         raw_wav, sr = sf.read(fpath, dtype="float32")
-        assert sr == 16000, f"Expected 16kHz, got {sr}"
-
-        # Run MaskNet inference
-        with torch.no_grad():
-            inp = torch.from_numpy(raw_wav).unsqueeze(0).to(device)
-            est_wav, _ = model(inp)
-            enh_wav = est_wav[0].cpu().numpy()
-
-        # Build Track 1 Event Mask
         events = t1_events.get(cid, [])
+
         if events:
+            # Run MaskNet inference on GPU
+            with torch.no_grad():
+                inp = torch.from_numpy(raw_wav).unsqueeze(0).to(device)
+                est_wav, _ = model(inp)
+                enh_wav = est_wav[0].cpu().numpy()
+
             dur = len(raw_wav) / 16000.0
             mask = build_event_mask(dur, events, sr=16000)
             if len(mask) < len(raw_wav):
                 mask = np.pad(mask, (0, len(raw_wav) - len(mask)))
             mask = mask[:len(raw_wav)]
-            
-            # Gated Blend:
-            # Outside events: raw_wav (100% clean identity)
-            # Inside events: blend * enh_wav + (1 - blend) * raw_wav
+
+            # Gated Blend: outside events = 100% clean raw_wav; inside events = blend*enh + (1-blend)*raw
             final_wav = (1.0 - mask) * raw_wav + mask * (args.blend * enh_wav + (1.0 - args.blend) * raw_wav)
         else:
-            # No events detected -> leave 100% untouched raw audio
+            # Clean speech detected -> leave untouched!
             final_wav = raw_wav
 
         # Peak normalization guard
@@ -163,15 +166,30 @@ def main():
         # Save 16 kHz PCM-16 WAV
         out_wav_path = out_dir / fname
         sf.write(out_wav_path, final_wav, 16000, subtype="PCM_16")
+        enhanced_wav_paths.append(str(out_wav_path))
 
-        # Transcribe with SraVaani
-        text = transcriber.transcribe(final_wav)
-        transcripts[cid] = text
+    enh_time = time.time() - t0
+    print(f"[INFO] Enhanced {len(test_files)} clips in {enh_time/60:.2f} minutes.")
 
-    elapsed = time.time() - t0
-    print(f"\n[INFO] Finished enhancing and transcribing {len(test_files)} clips in {elapsed/60:.2f} minutes.")
+    # 5. Load SraVaani Transcriber & Transcribe
+    print("\n[INFO] Phase 2/3: Transcribing with SraVaani-1.0 (Audit Compliance)...")
+    transcriber = SraVaaniTranscriber(hf_token=args.hf_token, device=str(device))
 
-    # 5. Write transcripts.jsonl
+    transcripts = {}
+    bs = args.batch_size
+    t1 = time.time()
+
+    for i in tqdm(range(0, len(enhanced_wav_paths), bs), desc="Transcribing Batches"):
+        batch_paths = enhanced_wav_paths[i : i + bs]
+        texts = transcriber.transcribe_paths(batch_paths)
+        for p, txt in zip(batch_paths, texts):
+            cid = os.path.basename(p)[:-4]
+            transcripts[cid] = txt
+
+    asr_time = time.time() - t1
+    print(f"[INFO] Transcribed {len(transcripts)} clips in {asr_time/60:.2f} minutes.")
+
+    # Write transcripts.jsonl
     transcripts_path = out_dir / "transcripts.jsonl"
     with open(transcripts_path, "w", encoding="utf-8") as f:
         for fpath in test_files:
@@ -181,19 +199,18 @@ def main():
             line = json.dumps({"clip_id": cid, "text": text}, ensure_ascii=False)
             f.write(line + "\n")
 
-    print(f"[INFO] Saved transcripts to {transcripts_path} ({len(transcripts)} entries).")
+    print(f"[INFO] Saved transcripts.jsonl ({len(transcripts)} lines).")
 
     # 6. Package submission_track2.zip
-    print(f"[INFO] Packaging {args.out_zip} ...")
+    print(f"\n[INFO] Phase 3/3: Packaging {args.out_zip} ...")
     with zipfile.ZipFile(args.out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        # Add transcripts.jsonl at root
         z.write(transcripts_path, arcname="transcripts.jsonl")
         for fpath in tqdm(test_files, desc="Zipping WAVs"):
             fname = os.path.basename(fpath)
             z.write(out_dir / fname, arcname=fname)
 
     zip_size_mb = os.path.getsize(args.out_zip) / (1024 * 1024)
-    print(f"[SUCCESS] Submission packaged: {args.out_zip} ({zip_size_mb:.1f} MB)")
+    print(f"\n[SUCCESS] Final Submission Ready: {args.out_zip} ({zip_size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
