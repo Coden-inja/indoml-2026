@@ -23,9 +23,27 @@ import torch
 import numpy as np
 from tqdm.auto import tqdm
 
-from config import CFG, WORK
+from config import CFG, WORK, FRAME_SEC, MIN_SAMPLES
 from model import WavLMSED
-from inference import export_track1
+from inference import t1_posteriors
+from evaluate import prob_to_events
+
+
+def export_track1_tuned(clip_id, wav, model, device, thr, med, min_dur, gate, merge_gap=0.05, sr=CFG["sr"]):
+    """Produce the submission record for one clip with precision event boundary resolution."""
+    post, clip_p = t1_posteriors(wav, model, device, sr)
+    dur = max(len(wav) / sr, MIN_SAMPLES / sr)
+    spans = []
+    events_iter = [] if clip_p < gate else prob_to_events(post[0], thr=thr, med=med, min_dur=min_dur, merge_gap=merge_gap)
+    for on, off in events_iter:
+        on, off = float(max(0.0, on)), float(min(dur, off))
+        if off - on < min_dur:
+            continue
+        spans.append([on, off])
+    return {
+        "clip_id": clip_id,
+        "events": [{"onset": round(float(a), 3), "offset": round(float(b), 3)} for a, b in spans],
+    }
 
 AUD = (".wav", ".flac", ".mp3", ".ogg")
 
@@ -51,6 +69,16 @@ def main():
                         help="Path to trained checkpoint file")
     parser.add_argument("--output-zip", type=str, default="submission_track1.zip",
                         help="Filename for submission zip")
+    parser.add_argument("--thr", type=float, default=0.45,
+                        help="Noise detection threshold (default: 0.45)")
+    parser.add_argument("--med", type=int, default=7,
+                        help="Median filter window size (default: 7)")
+    parser.add_argument("--min-dur", type=float, default=0.10,
+                        help="Minimum event duration in seconds (default: 0.10s)")
+    parser.add_argument("--gate", type=float, default=0.25,
+                        help="Clip-level silence gate (default: 0.25)")
+    parser.add_argument("--merge-gap", type=float, default=0.05,
+                        help="Max gap to merge neighboring events (default: 0.05s)")
     args = parser.parse_args()
 
     test_dir = Path(args.test_dir)
@@ -137,12 +165,13 @@ def main():
     model.load_state_dict(ck["model"])
     model.eval()
 
-    # Retrieve optimal swept post-processing parameters
-    thr = float(ck.get("thr", 0.50))
-    med = int(ck.get("med", 7))
-    min_dur = float(ck.get("min_dur", 0.05))
-    gate = float(ck.get("gate", 0.0))
-    print(f"[INFO] Using post-processing parameters: thr={thr}, med={med}, min_dur={min_dur}s, gate={gate}")
+    # Retrieve post-processing parameters (CLI overrides checkpoint values)
+    thr = args.thr if args.thr is not None else float(ck.get("thr", 0.45))
+    med = args.med if args.med is not None else int(ck.get("med", 7))
+    min_dur = args.min_dur if args.min_dur is not None else float(ck.get("min_dur", 0.10))
+    gate = args.gate if args.gate is not None else float(ck.get("gate", 0.25))
+    merge_gap = args.merge_gap if args.merge_gap is not None else float(ck.get("merge_gap", 0.05))
+    print(f"[INFO] Using post-processing parameters: thr={thr}, med={med}, min_dur={min_dur}s, gate={gate}, merge_gap={merge_gap}s")
 
     files = sorted([p for p in test_dir.rglob("*") if p.suffix.lower() in AUD])
     print(f"[INFO] Found {len(files):,} test audio clips in {test_dir.resolve()}")
@@ -151,11 +180,11 @@ def main():
         print("[ERROR] No audio files found in test directory! Check directory structure.")
         return
 
-    print("\n--- RUNNING WHOLE-CLIP INFERENCE ---")
+    print("\n--- RUNNING WHOLE-CLIP INFERENCE (TUNED BOUNDARIES) ---")
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for p in tqdm(files, desc="Inference"):
             wav = read_audio(p, sr=CFG["sr"])
-            rec = export_track1(p.stem, wav, model, device, thr, med, min_dur, gate)
+            rec = export_track1_tuned(p.stem, wav, model, device, thr=thr, med=med, min_dur=min_dur, gate=gate, merge_gap=merge_gap)
             f.write(json.dumps({"clip_id": p.stem, "events": rec["events"]}, ensure_ascii=False) + "\n")
 
     # Package into official ZIP format (predictions.jsonl must be at the root of the ZIP)
