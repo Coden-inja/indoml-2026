@@ -74,7 +74,7 @@ def main():
         print("Please download and unzip input_data first.")
         return
 
-    if not ckpt_path.exists():
+    if not ckpt_path.exists() or ckpt_path.is_dir():
         # Fallback checks in various locations
         for cand in [
             Path("/kaggle/working") / ckpt_path.name,
@@ -84,9 +84,28 @@ def main():
             Path("t1_wavlm_best.pt"),
             Path(__file__).resolve().parent / "t1_wavlm.pt",
         ]:
-            if cand.exists():
+            if cand.exists() and cand.is_file():
                 ckpt_path = cand
                 break
+
+    # If checkpoint is extracted as a directory in /kaggle/input (e.g. from Kaggle dataset upload)
+    if not ckpt_path.exists() or ckpt_path.is_dir():
+        input_root = Path("/kaggle/input")
+        if input_root.exists():
+            data_pkls = list(input_root.rglob("data.pkl"))
+            if data_pkls:
+                model_dir = data_pkls[0].parent
+                print(f"[INFO] Detected unzipped checkpoint directory at: {model_dir}")
+                print(f"[INFO] Packaging into /kaggle/working/t1_wavlm.pt...")
+                import shutil
+                shutil.make_archive("/kaggle/working/t1_wavlm", "zip", str(model_dir))
+                cand_zip = Path("/kaggle/working/t1_wavlm.zip")
+                cand_pt = Path("/kaggle/working/t1_wavlm.pt")
+                if cand_zip.exists():
+                    if cand_pt.exists():
+                        cand_pt.unlink()
+                    cand_zip.rename(cand_pt)
+                ckpt_path = cand_pt
 
     if not ckpt_path.exists():
         print(f"[ERROR] Checkpoint not found: {ckpt_path.resolve()}")
