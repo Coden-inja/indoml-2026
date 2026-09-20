@@ -1,27 +1,22 @@
-"""Complex Ratio MaskNet (cRM) for IndoML 2026 Track 2 Speech Enhancement.
+"""Complex Ratio MaskNet (cRM) with HF Simulated Pretraining & Real Fine-Tuning.
 
-Architecture:
-- Front-End: Complex STFT (n_fft=512, hop=160, win=512).
-- Input Representation: Concatenated Real, Imaginary, and Magnitude spectrograms (3 * 257 = 771 features).
-- Core Separator: 4-Layer BiGRU with LayerNorm and Residual Connections (hidden_size=384).
-- Dual Output Heads:
-    * Real Mask M_r in [-2.0, 2.0]
-    * Imaginary Mask M_i in [-2.0, 2.0]
-- Complex Spectral Multiplication:
-    S_r = M_r * X_r - M_i * X_i
-    S_i = M_r * X_i + M_i * X_r
-  Enables active phase rotation and noise cancellation in the complex plane.
-- Reconstruction: iSTFT back to time-domain waveform.
-- Dual-Domain Loss: Time-Domain SI-SDR Loss + Multi-Resolution STFT Loss.
+Two-Stage Championship Training for IndoML 2026 Track 2:
+  Stage 1 (Pre-training): Streams Gold-tier audio from ARTPARK-IISc/Vaani-Noise-Event-Dataset,
+                          extracts clean speech spans and noise event spans, and trains on
+                          thousands of dynamically simulated mixtures across random SNRs.
+  Stage 2 (Fine-tuning):  Fine-tunes directly on the 695 official organizer pairs with
+                          active phase cancellation (Complex Ratio Masking) and Multi-Res STFT loss.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
+import io
 import json
 import os
 import random
+import re
+import sys
 import time
 from pathlib import Path
 
@@ -31,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 
 # ---------------------------------------------------------------------------
 # Signal Processing Parameters
@@ -40,6 +36,7 @@ N_FFT = 512
 HOP_LEN = 160
 WIN_LEN = 512
 CHUNK_SAMP = 64000  # 4-second slices during training
+REPO = "ARTPARK-IISc/Vaani-Noise-Event-Dataset"
 
 
 def seed_everything(seed: int = 42):
@@ -50,7 +47,7 @@ def seed_everything(seed: int = 42):
 
 
 # ---------------------------------------------------------------------------
-# Multi-Resolution STFT Loss
+# Losses & Metrics
 # ---------------------------------------------------------------------------
 class MultiResolutionSTFTLoss(nn.Module):
     def __init__(
@@ -70,21 +67,17 @@ class MultiResolutionSTFTLoss(nn.Module):
             w = torch.hann_window(win, device=est.device)
             est_stft = torch.stft(est, n_fft, hop, win, window=w, return_complex=True)
             ref_stft = torch.stft(ref, n_fft, hop, win, window=w, return_complex=True)
-            
+
             est_mag = torch.abs(est_stft) + 1e-7
             ref_mag = torch.abs(ref_stft) + 1e-7
-            
-            # Spectral Convergence Loss
+
             sc_loss = torch.norm(ref_mag - est_mag, p="fro") / (torch.norm(ref_mag, p="fro") + 1e-7)
-            # Log Magnitude STFT Loss
             log_loss = F.l1_loss(torch.log(est_mag), torch.log(ref_mag))
-            
-            total_loss += (sc_loss + log_loss)
+            total_loss += sc_loss + log_loss
         return total_loss / len(self.fft_sizes)
 
 
 def calc_si_sdr_np(ref: np.ndarray, est: np.ndarray, eps: float = 1e-8) -> float:
-    """Numpy SI-SDR calculation clipped to [-100, 100] dB."""
     ref = np.asarray(ref, dtype=np.float64)
     est = np.asarray(est, dtype=np.float64)
     n = min(len(ref), len(est))
@@ -99,7 +92,6 @@ def calc_si_sdr_np(ref: np.ndarray, est: np.ndarray, eps: float = 1e-8) -> float
 
 
 def si_sdr_loss_torch(est: torch.Tensor, ref: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Batched Time-Domain SI-SDR loss (negated to minimize)."""
     est = est - est.mean(dim=-1, keepdim=True)
     ref = ref - ref.mean(dim=-1, keepdim=True)
     alpha = (est * ref).sum(dim=-1, keepdim=True) / ((ref * ref).sum(dim=-1, keepdim=True) + eps)
@@ -126,17 +118,16 @@ class ComplexMaskNet(nn.Module):
         self.hop_len = hop_len
         self.win_len = win_len
         self.num_bins = n_fft // 2 + 1  # 257 bins
-        
+
         self.register_buffer("window", torch.hann_window(win_len))
-        
-        # Real, Imag, and Mag features: 257 * 3 = 771
+
         in_dim = self.num_bins * 3
         self.in_proj = nn.Sequential(
             nn.Linear(in_dim, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.PReLU(),
         )
-        
+
         self.gru = nn.GRU(
             input_size=hidden_size,
             hidden_size=hidden_size,
@@ -145,8 +136,7 @@ class ComplexMaskNet(nn.Module):
             bidirectional=True,
             dropout=0.15 if num_layers > 1 else 0.0,
         )
-        
-        # Complex Mask Heads
+
         self.real_head = nn.Sequential(
             nn.Linear(hidden_size * 2, hidden_size),
             nn.PReLU(),
@@ -161,10 +151,6 @@ class ComplexMaskNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        x: (B, T) raw audio at 16 kHz
-        returns: (B, T) enhanced audio, (B, F, T) real mask, (B, F, T) imag mask
-        """
         B, T = x.shape
         stft_c = torch.stft(
             x,
@@ -174,28 +160,21 @@ class ComplexMaskNet(nn.Module):
             window=self.window,
             return_complex=True,
         )
-        xr = stft_c.real  # (B, F, num_frames)
-        xi = stft_c.imag  # (B, F, num_frames)
+        xr = stft_c.real
+        xi = stft_c.imag
         xmag = torch.abs(stft_c)
 
-        # Concatenate Real, Imag, Mag along frequency dimension
-        # (B, 3*F, num_frames) -> permute to (B, num_frames, 3*F)
         feat = torch.cat([xr, xi, xmag], dim=1).permute(0, 2, 1)
         h = self.in_proj(feat)
         gru_out, _ = self.gru(h)
 
-        # Scale tanh to [-2.0, 2.0]
         mr = self.real_head(gru_out).permute(0, 2, 1) * 2.0
         mi = self.imag_head(gru_out).permute(0, 2, 1) * 2.0
 
-        # Complex ratio multiplication:
-        # S_real = M_r * X_r - M_i * X_i
-        # S_imag = M_r * X_i + M_i * X_r
         sr = mr * xr - mi * xi
         si = mr * xi + mi * xr
         s_c = torch.complex(sr, si)
 
-        # Invert to time domain
         est_wav = torch.istft(
             s_c,
             n_fft=self.n_fft,
@@ -208,10 +187,164 @@ class ComplexMaskNet(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Dataset & Augmentation
+# HF Bank Builder & Dynamic Mixture Generator
 # ---------------------------------------------------------------------------
-class ComplexAudioPairDataset(Dataset):
-    def __init__(self, pairs: list[tuple[str, str]], chunk_samp: int = CHUNK_SAMP, is_train: bool = True):
+def decode_hf_audio(cell, target_sr=16000):
+    if isinstance(cell, dict):
+        if cell.get("bytes"):
+            w, sr = sf.read(io.BytesIO(cell["bytes"]), dtype="float32")
+        elif cell.get("path"):
+            w, sr = sf.read(cell["path"], dtype="float32")
+        elif cell.get("array") is not None:
+            w, sr = np.asarray(cell["array"], dtype=np.float32), cell["sampling_rate"]
+        else:
+            return None
+    else:
+        return None
+    if w.ndim > 1:
+        w = w.mean(axis=1)
+    if sr != target_sr:
+        import librosa
+        w = librosa.resample(w, orig_sr=sr, target_sr=target_sr)
+    return w.astype(np.float32)
+
+
+def build_hf_banks(max_gold=1200, bank_dir="/kaggle/working/banks", token=None):
+    from datasets import load_dataset, Audio
+
+    clean_dir = Path(bank_dir) / "clean"
+    noise_dir = Path(bank_dir) / "noise"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    noise_dir.mkdir(parents=True, exist_ok=True)
+
+    clean_idx_path = Path(bank_dir) / "clean_index.json"
+    noise_idx_path = Path(bank_dir) / "noise_index.json"
+
+    if clean_idx_path.exists() and noise_idx_path.exists():
+        with open(clean_idx_path) as f:
+            c_idx = json.load(f)
+        with open(noise_idx_path) as f:
+            n_idx = json.load(f)
+        if len(c_idx) > 200 and len(n_idx) > 200:
+            print(f"[INFO] Loaded existing audio banks: {len(c_idx)} clean, {len(n_idx)} noise.")
+            return c_idx, n_idx
+
+    print(f"[INFO] Streaming {max_gold} Gold clips from HF to build clean & noise banks...")
+    raw = load_dataset(REPO, split="train", streaming=True, token=token)
+    raw = raw.cast_column("audio", Audio(decode=False))
+
+    clean_idx, noise_idx, n_gold = [], [], 0
+    t0 = time.time()
+
+    for i, ex in enumerate(raw):
+        if ex.get("annotationQuality") != "verified_timestamps":
+            continue
+        if n_gold >= max_gold:
+            break
+
+        try:
+            wav = decode_hf_audio(ex["audio"])
+        except Exception:
+            continue
+        if wav is None or len(wav) < SR * 1.0:
+            continue
+
+        n_gold += 1
+        dur = len(wav) / SR
+        stamps = ex.get("NoiseSubCategoryTimeStamp") or []
+        spans = []
+        for s in stamps:
+            try:
+                st, en = float(s["start"]), float(s["end"])
+                if en > st:
+                    spans.append((st, en))
+            except Exception:
+                continue
+        spans = sorted(spans)
+
+        # 1. Clean spans: gaps between events
+        cur = 0.0
+        for k, (st, en) in enumerate(spans):
+            if st - cur >= 1.5:
+                seg = wav[int(cur * SR) : int(st * SR)]
+                if np.abs(seg).max() > 1e-3:
+                    p = clean_dir / f"c_{n_gold:05d}_{k}.wav"
+                    sf.write(p, seg, SR)
+                    clean_idx.append(str(p))
+            cur = max(cur, en)
+        if dur - cur >= 1.5:
+            seg = wav[int(cur * SR) : int(dur * SR)]
+            if np.abs(seg).max() > 1e-3:
+                p = clean_dir / f"c_{n_gold:05d}_end.wav"
+                sf.write(p, seg, SR)
+                clean_idx.append(str(p))
+
+        # 2. Noise spans: the events
+        for k, (st, en) in enumerate(spans):
+            if 0.3 <= en - st <= 5.0:
+                seg = wav[int(st * SR) : int(en * SR)]
+                if np.abs(seg).max() > 1e-3:
+                    p = noise_dir / f"n_{n_gold:05d}_{k}.wav"
+                    sf.write(p, seg, SR)
+                    noise_idx.append(str(p))
+
+        if n_gold % 200 == 0:
+            print(f"  [HF Bank] Processed {n_gold}/{max_gold} clips ({len(clean_idx)} clean, {len(noise_idx)} noise)...")
+
+    with open(clean_idx_path, "w") as f:
+        json.dump(clean_idx, f)
+    with open(noise_idx_path, "w") as f:
+        json.dump(noise_idx, f)
+
+    print(f"[INFO] Built banks in {(time.time()-t0)/60:.1f} mins: {len(clean_idx)} clean, {len(noise_idx)} noise.")
+    return clean_idx, noise_idx
+
+
+class DynamicMixtureDataset(Dataset):
+    def __init__(self, clean_paths, noise_paths, length=6000, chunk_samp=CHUNK_SAMP):
+        self.clean_paths = clean_paths
+        self.noise_paths = noise_paths
+        self.length = length
+        self.chunk_samp = chunk_samp
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        cp = random.choice(self.clean_paths)
+        clean, _ = sf.read(cp, dtype="float32")
+        if len(clean) < self.chunk_samp:
+            clean = np.pad(clean, (0, self.chunk_samp - len(clean)))
+        else:
+            s = random.randint(0, len(clean) - self.chunk_samp)
+            clean = clean[s : s + self.chunk_samp]
+
+        # Sample noise and mix at random SNR [-6 dB, +12 dB]
+        np_ = random.choice(self.noise_paths)
+        noise, _ = sf.read(np_, dtype="float32")
+        if len(noise) < self.chunk_samp:
+            noise = np.tile(noise, int(np.ceil(self.chunk_samp / max(1, len(noise)))))[: self.chunk_samp]
+        else:
+            s = random.randint(0, len(noise) - self.chunk_samp)
+            noise = noise[s : s + self.chunk_samp]
+
+        clean_pwr = np.mean(clean**2) + 1e-8
+        noise_pwr = np.mean(noise**2) + 1e-8
+        target_snr_db = random.uniform(-6.0, 12.0)
+        target_noise_pwr = clean_pwr / (10.0 ** (target_snr_db / 10.0))
+        scale = np.sqrt(target_noise_pwr / noise_pwr)
+        
+        mix = clean + scale * noise
+        pk = np.abs(mix).max()
+        if pk > 0.99:
+            mix = mix / pk * 0.95
+            clean = clean / pk * 0.95
+
+        return torch.from_numpy(mix.astype(np.float32)), torch.from_numpy(clean.astype(np.float32))
+
+
+class RealAudioPairDataset(Dataset):
+    def __init__(self, pairs, chunk_samp=CHUNK_SAMP, is_train=True):
         self.pairs = pairs
         self.chunk_samp = chunk_samp
         self.is_train = is_train
@@ -219,7 +352,7 @@ class ComplexAudioPairDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx):
         noisy_path, clean_path = self.pairs[idx]
         noisy, _ = sf.read(noisy_path, dtype="float32")
         clean, _ = sf.read(clean_path, dtype="float32")
@@ -228,13 +361,9 @@ class ComplexAudioPairDataset(Dataset):
         noisy, clean = noisy[:n], clean[:n]
 
         if self.is_train:
-            # Data Augmentation: dynamic SNR re-weighting
             if random.random() < 0.35:
                 noise_part = noisy - clean
-                scale = random.uniform(0.5, 1.5)
-                noisy = clean + scale * noise_part
-
-            # Random Gain Jitter
+                noisy = clean + random.uniform(0.5, 1.5) * noise_part
             gain = random.uniform(0.8, 1.2)
             noisy = noisy * gain
             clean = clean * gain
@@ -252,10 +381,10 @@ class ComplexAudioPairDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Model Evaluation
+# Evaluation
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def evaluate_model(model: nn.Module, held_out_pairs: list[tuple[str, str]], device: torch.device) -> tuple[float, float]:
+def evaluate_model(model, held_out_pairs, device):
     model.eval()
     raw_sdrs, enh_sdrs = [], []
     for noisy_path, clean_path in held_out_pairs:
@@ -270,21 +399,24 @@ def evaluate_model(model: nn.Module, held_out_pairs: list[tuple[str, str]], devi
 
         raw_sdrs.append(calc_si_sdr_np(clean, noisy))
         enh_sdrs.append(calc_si_sdr_np(clean, enh))
-
     return float(np.mean(raw_sdrs)), float(np.mean(enh_sdrs))
 
 
 # ---------------------------------------------------------------------------
-# Training Orchestration
+# Training Pipeline
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Complex Ratio MaskNet Training")
+    parser = argparse.ArgumentParser(description="Complex Ratio MaskNet (cRM) Two-Stage Pipeline")
     parser.add_argument("--val-root", type=str, default="/kaggle/working/val_data/validation")
-    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--hf-pretrain", action="store_true", help="Enable Stage 1 pretraining on HF dynamic mixtures")
+    parser.add_argument("--max-gold", type=int, default=1000, help="Gold clips to stream for bank generation")
+    parser.add_argument("--sim-samples", type=int, default=5000, help="Number of simulated mixtures to generate")
+    parser.add_argument("--pretrain-epochs", type=int, default=25, help="Stage 1 pretrain epochs")
+    parser.add_argument("--finetune-epochs", type=int, default=60, help="Stage 2 fine-tune epochs")
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--hidden-size", type=int, default=384)
     parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--stft-weight", type=float, default=0.20)
     parser.add_argument("--save-ckpt", type=str, default="/kaggle/working/t2_complex_masknet_best.pt")
     args = parser.parse_args()
@@ -293,10 +425,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using compute device: {device}")
 
+    # Load Real Pairs
     val_root = Path(args.val_root)
     meta_path = val_root / "validationMetadata.json"
-    assert meta_path.exists(), f"validationMetadata.json not found at {meta_path}"
-
     with open(meta_path) as f:
         meta = json.load(f)
 
@@ -304,58 +435,92 @@ def main():
     clean_dir = val_root / "syntheticCleanRefAudio"
     noise_dir = val_root / "syntheticNoiseAudio"
 
-    pairs = []
+    real_pairs = []
     for item in synth_items:
         fn = item["segmentFileName"]
         cp = clean_dir / fn
         np_ = noise_dir / fn
         if cp.exists() and np_.exists():
-            pairs.append((str(np_), str(cp)))
+            real_pairs.append((str(np_), str(cp)))
 
-    print(f"[INFO] Successfully matched {len(pairs)} (noisy, clean) audio pairs.")
+    random.Random(42).shuffle(real_pairs)
+    train_pairs = real_pairs[:550]
+    val_pairs = real_pairs[550:]
+    print(f"[INFO] Real Pairs: {len(train_pairs)} train | {len(val_pairs)} held-out validation")
 
-    random.Random(42).shuffle(pairs)
-    train_pairs = pairs[:550]
-    val_pairs = pairs[550:]
-    print(f"[INFO] Train pairs: {len(train_pairs)} | Held-out validation pairs: {len(val_pairs)}")
-
-    train_ds = ComplexAudioPairDataset(train_pairs, is_train=True)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-
-    model = ComplexMaskNet(
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-    ).to(device)
-
+    # Initialize Model
+    model = ComplexMaskNet(hidden_size=args.hidden_size, num_layers=args.num_layers).to(device)
+    mr_stft_loss_fn = MultiResolutionSTFTLoss().to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[INFO] Initialized ComplexMaskNet ({total_params / 1e6:.2f}M trainable parameters).")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs * len(train_loader), eta_min=1e-6)
-    mr_stft_loss_fn = MultiResolutionSTFTLoss().to(device)
+    # =========================================================================
+    # STAGE 1: Pre-training on HF Simulated Mixtures (Optional / Flagged)
+    # =========================================================================
+    if args.hf_pretrain:
+        print("\n" + "=" * 80)
+        print("          STAGE 1: PRE-TRAINING ON HF DYNAMIC MIXTURES")
+        print("=" * 80)
+        token = os.environ.get("HF_TOKEN")
+        clean_banks, noise_banks = build_hf_banks(max_gold=args.max_gold, token=token)
+        sim_ds = DynamicMixtureDataset(clean_banks, noise_banks, length=args.sim_samples)
+        sim_loader = DataLoader(sim_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+
+        opt1 = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        sched1 = torch.optim.lr_scheduler.CosineAnnealingLR(opt1, T_max=args.pretrain_epochs * len(sim_loader))
+
+        for ep in range(1, args.pretrain_epochs + 1):
+            t0 = time.time()
+            model.train()
+            tot_loss = 0.0
+            n_b = 0
+            for mix_b, clean_b in sim_loader:
+                mix_b, clean_b = mix_b.to(device), clean_b.to(device)
+                opt1.zero_grad()
+                est_b, _, _ = model(mix_b)
+                l = si_sdr_loss_torch(est_b, clean_b) + args.stft_weight * mr_stft_loss_fn(est_b, clean_b)
+                l.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                opt1.step()
+                sched1.step()
+                tot_loss += float(l.item())
+                n_b += 1
+            print(f"Pretrain Epoch {ep:02d}/{args.pretrain_epochs} [{time.time()-t0:.1f}s] Loss: {tot_loss/max(1,n_b):.4f}")
+
+    # =========================================================================
+    # STAGE 2: Fine-Tuning on Official Pairs
+    # =========================================================================
+    print("\n" + "=" * 85)
+    print("          STAGE 2: FINE-TUNING ON OFFICIAL VALIDATION PAIRS")
+    print("=" * 85)
+
+    real_ds = RealAudioPairDataset(train_pairs, is_train=True)
+    real_loader = DataLoader(real_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+
+    ft_lr = args.lr if not args.hf_pretrain else args.lr * 0.5
+    optimizer = torch.optim.AdamW(model.parameters(), lr=ft_lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.finetune_epochs * len(real_loader), eta_min=1e-6)
 
     raw_val0, enh_val0 = evaluate_model(model, val_pairs, device)
-    print(f"\n[BASELINE] Held-out Raw SI-SDR: {raw_val0:+.2f} dB | Untrained Model: {enh_val0:+.2f} dB\n")
+    print(f"\n[BASELINE] Held-out Raw SI-SDR: {raw_val0:+.2f} dB | Current Model: {enh_val0:+.2f} dB\n")
 
     best_sdr = -1e9
     print("=" * 85)
     print(f"{'Epoch':^7} | {'Total Loss':^12} | {'SI-SDR Loss':^12} | {'Val SI-SDR':^12} | {'Delta':^9} | {'Time':^8}")
     print("=" * 85)
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, args.finetune_epochs + 1):
         t0 = time.time()
         model.train()
         tot_loss_accum = 0.0
         sdr_loss_accum = 0.0
         n_batches = 0
 
-        for noisy_b, clean_b in train_loader:
-            noisy_b = noisy_b.to(device)
-            clean_b = clean_b.to(device)
+        for noisy_b, clean_b in real_loader:
+            noisy_b, clean_b = noisy_b.to(device), clean_b.to(device)
 
             optimizer.zero_grad()
             est_b, _, _ = model(noisy_b)
-
             loss_sdr = si_sdr_loss_torch(est_b, clean_b)
             loss_stft = mr_stft_loss_fn(est_b, clean_b)
             loss = loss_sdr + args.stft_weight * loss_stft
@@ -397,7 +562,7 @@ def main():
             print(f"   --> New Best Checkpoint: {best_sdr:+.2f} dB (Saved to {args.save_ckpt})")
 
     print("=" * 85)
-    print(f"[TRAINING COMPLETE] Peak Held-out SI-SDR: {best_sdr:+.2f} dB (Saved to {args.save_ckpt})")
+    print(f"[COMPLETE] Peak Held-out SI-SDR: {best_sdr:+.2f} dB (Saved to {args.save_ckpt})")
 
 
 if __name__ == "__main__":
