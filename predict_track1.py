@@ -98,12 +98,15 @@ def main():
                 print(f"[INFO] Detected unzipped checkpoint directory at: {model_dir}")
                 print(f"[INFO] Packaging into /kaggle/working/t1_wavlm.pt...")
                 import shutil
-                shutil.make_archive("/kaggle/working/t1_wavlm", "zip", str(model_dir))
                 cand_zip = Path("/kaggle/working/t1_wavlm.zip")
                 cand_pt = Path("/kaggle/working/t1_wavlm.pt")
+                if cand_pt.exists():
+                    cand_pt.unlink()
                 if cand_zip.exists():
-                    if cand_pt.exists():
-                        cand_pt.unlink()
+                    cand_zip.unlink()
+                # PyTorchFileReader expects the internal paths to start with 't1_wavlm/'
+                shutil.make_archive("/kaggle/working/t1_wavlm", "zip", root_dir=str(model_dir.parent), base_dir=model_dir.name)
+                if cand_zip.exists():
                     cand_zip.rename(cand_pt)
                 ckpt_path = cand_pt
 
