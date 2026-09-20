@@ -30,7 +30,19 @@ from inference import t1_posteriors
 from evaluate import (
     prob_to_events, event_based_f1, segment_dice
 )
-from predict_track1 import read_audio, export_track1_tuned, is_valid_torch_file
+from predict_track1 import read_audio, export_track1_tuned
+
+
+def is_valid_torch_file(p: Path) -> bool:
+    if not p.is_file():
+        return False
+    try:
+        import zipfile
+        with zipfile.ZipFile(str(p), "r") as z:
+            names = z.namelist()
+            return any("data.pkl" in n for n in names) and any("version" in n for n in names)
+    except Exception:
+        return False
 
 
 def parse_ground_truth(meta_path: Path):

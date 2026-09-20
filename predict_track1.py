@@ -61,6 +61,18 @@ def read_audio(p: Path, sr: int = CFG["sr"]) -> np.ndarray:
     return np.ascontiguousarray(w, dtype=np.float32)
 
 
+def is_valid_torch_file(p: Path) -> bool:
+    if not p.is_file():
+        return False
+    try:
+        import zipfile
+        with zipfile.ZipFile(str(p), "r") as z:
+            names = z.namelist()
+            return any("data.pkl" in n for n in names) and any("version" in n for n in names)
+    except Exception:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="IndoML 2026 Track 1 - Inference & Submission Generator")
     parser.add_argument("--test-dir", type=str, default="/kaggle/working/test_audio",
