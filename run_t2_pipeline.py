@@ -152,8 +152,8 @@ def main():
             # Run MaskNet inference on GPU
             with torch.no_grad():
                 inp = torch.from_numpy(raw_wav).unsqueeze(0).to(device)
-                est_wav, _ = model(inp)
-                enh_wav = est_wav[0].cpu().numpy()
+                out = model(inp)
+                enh_wav = out[0][0].cpu().numpy()
 
             dur = len(raw_wav) / 16000.0
             mask = build_event_mask(dur, events, sr=16000)
