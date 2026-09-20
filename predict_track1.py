@@ -74,22 +74,36 @@ def main():
         print("Please download and unzip input_data first.")
         return
 
-    if not ckpt_path.exists() or ckpt_path.is_dir():
-        # Fallback checks in various locations
-        for cand in [
-            Path("/kaggle/working") / ckpt_path.name,
-            Path("/kaggle/working/t1_wavlm.pt"),
-            Path("/kaggle/working/t1_wavlm_best.pt"),
-            Path("t1_wavlm.pt"),
-            Path("t1_wavlm_best.pt"),
-            Path(__file__).resolve().parent / "t1_wavlm.pt",
-        ]:
-            if cand.exists() and cand.is_file():
+    def is_valid_torch_file(p: Path) -> bool:
+        if not p.is_file():
+            return False
+        try:
+            import zipfile
+            with zipfile.ZipFile(str(p), "r") as z:
+                names = z.namelist()
+                return any("data.pkl" in n for n in names) and any("version" in n for n in names)
+        except Exception:
+            return False
+
+    # Check candidates
+    for cand in [
+        Path("/kaggle/working") / ckpt_path.name,
+        Path("/kaggle/working/t1_wavlm.pt"),
+        Path("/kaggle/working/t1_wavlm_best.pt"),
+        Path("t1_wavlm.pt"),
+        Path("t1_wavlm_best.pt"),
+        Path(__file__).resolve().parent / "t1_wavlm.pt",
+    ]:
+        if cand.exists() and cand.is_file():
+            if is_valid_torch_file(cand):
                 ckpt_path = cand
                 break
+            else:
+                print(f"[WARN] Removing corrupt/stale checkpoint: {cand}")
+                cand.unlink()
 
     # If checkpoint is extracted as a directory in /kaggle/input (e.g. from Kaggle dataset upload)
-    if not ckpt_path.exists() or ckpt_path.is_dir():
+    if not ckpt_path.exists() or ckpt_path.is_dir() or not is_valid_torch_file(ckpt_path):
         input_root = Path("/kaggle/input")
         if input_root.exists():
             data_pkls = list(input_root.rglob("data.pkl"))
