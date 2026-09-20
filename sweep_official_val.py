@@ -164,32 +164,66 @@ def main():
     model.load_state_dict(ck["model"])
     model.eval()
 
-    # 4. Run Model ONCE & Cache Posteriors
-    print("\n--- 1. RUNNING MODEL FORWARD PASS ON VALIDATION CLIPS ---")
-    cache = []
-    ref_dict = {}
+    # 4. Run Model ONCE & Cache Posteriors (or load from disk)
+    cache_file = Path(f"val_cache_{len(matched_cids)}.pt")
+    if cache_file.exists():
+        print(f"\n--- 1. LOADING CACHED POSTERIORS FROM DISK ({cache_file.name}) ---")
+        saved = torch.load(cache_file, map_location="cpu", weights_only=False)
+        cache = saved["cache"]
+        ref_dict = saved["ref_dict"]
+        print(f"[SUCCESS] Loaded {len(cache)} cached validation clip posteriors.")
+    else:
+        print("\n--- 1. RUNNING MODEL FORWARD PASS ON VALIDATION CLIPS ---")
+        cache = []
+        ref_dict = {}
 
-    for cid in tqdm(matched_cids, desc="Caching Posteriors"):
-        wav_path = audio_files[cid]
-        wav = read_audio(wav_path, sr=CFG["sr"])
-        dur = len(wav) / CFG["sr"]
-        post, cp = t1_posteriors(wav, model, device, sr=CFG["sr"])
-        cache.append({
-            "cid": cid,
-            "post": post[0].copy(),
-            "cp": float(cp),
-            "dur": float(dur),
-        })
-        ref_dict[cid] = gt_dict[cid]
+        for cid in tqdm(matched_cids, desc="Caching Posteriors"):
+            wav_path = audio_files[cid]
+            wav = read_audio(wav_path, sr=CFG["sr"])
+            dur = len(wav) / CFG["sr"]
+            post, cp = t1_posteriors(wav, model, device, sr=CFG["sr"])
+            cache.append({
+                "cid": cid,
+                "post": post[0].copy(),
+                "cp": float(cp),
+                "dur": float(dur),
+            })
+            ref_dict[cid] = gt_dict[cid]
 
-    print(f"[SUCCESS] Cached posterior maps for {len(cache)} validation clips.")
+        print(f"[SUCCESS] Cached posterior maps for {len(cache)} validation clips. Saving to {cache_file}...")
+        torch.save({"cache": cache, "ref_dict": ref_dict}, cache_file)
+
+    # Calculate baseline score for comparison
+    def eval_config(thr, med, mind, mgap, gate):
+        pred_dict = {}
+        for item in cache:
+            cid, dur = item["cid"], item["dur"]
+            if item["cp"] < gate:
+                pred_dict[cid] = []
+            else:
+                raw_evs = prob_to_events(item["post"], thr=thr, med=med, min_dur=mind, merge_gap=mgap)
+                valid_evs = []
+                for on, off in raw_evs:
+                    on, off = max(0.0, on), min(dur, off)
+                    if off - on >= mind:
+                        valid_evs.append((round(float(on), 3), round(float(off), 3)))
+                pred_dict[cid] = valid_evs
+        f1, prec, rec, tp, fp, fn = event_based_f1(ref_dict, pred_dict)
+        dice = segment_dice(ref_dict, pred_dict)
+        return {"comb": f1 + dice, "f1": f1, "dice": dice, "prec": prec, "rec": rec}
+
+    base_metrics = eval_config(thr=0.45, med=7, mind=0.05, mgap=0.05, gate=0.25)
+    print("\n" + "=" * 80)
+    print(f"  BASELINE (Submission #1 config: thr=0.45, med=7, mind=0.05s, mgap=0.05s, gate=0.25)")
+    print(f"  Validation Comb: {base_metrics['comb']:.4f} | Event F1: {base_metrics['f1']:.4f} | Segment Dice: {base_metrics['dice']:.4f}")
+    print("=" * 80)
 
     # 5. Grid Search over Post-Processing Hyperparameters
     print("\n--- 2. EXHAUSTIVE EMPIRICAL HYPERPARAMETER SWEEP ---")
-    thresholds = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
-    medians = [1, 3, 5, 7, 9, 11]
-    min_durs = [0.03, 0.05, 0.08, 0.10, 0.15]
-    merge_gaps = [0.03, 0.05, 0.08, 0.10, 0.15]
+    thresholds = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+    medians = [5, 7, 9, 11, 13, 15]
+    min_durs = [0.03, 0.05, 0.08, 0.10]
+    merge_gaps = [0.03, 0.05, 0.08, 0.10]
     clip_gates = [0.0, 0.10, 0.20, 0.30]
 
     total_configs = len(thresholds) * len(medians) * len(min_durs) * len(merge_gaps) * len(clip_gates)
@@ -201,32 +235,13 @@ def main():
             for mind in min_durs:
                 for mgap in merge_gaps:
                     for gate in clip_gates:
-                        pred_dict = {}
-                        for item in cache:
-                            cid = item["cid"]
-                            dur = item["dur"]
-                            if item["cp"] < gate:
-                                pred_dict[cid] = []
-                            else:
-                                raw_evs = prob_to_events(item["post"], thr=thr, med=med, min_dur=mind, merge_gap=mgap)
-                                valid_evs = []
-                                for on, off in raw_evs:
-                                    on = max(0.0, on)
-                                    off = min(dur, off)
-                                    if off - on >= mind:
-                                        valid_evs.append((round(float(on), 3), round(float(off), 3)))
-                                pred_dict[cid] = valid_evs
-
-                        f1, prec, rec, tp, fp, fn = event_based_f1(ref_dict, pred_dict)
-                        dice = segment_dice(ref_dict, pred_dict)
-                        comb = f1 + dice
-
+                        m = eval_config(thr, med, mind, mgap, gate)
                         results.append({
-                            "comb": float(comb),
-                            "f1": float(f1),
-                            "dice": float(dice),
-                            "prec": float(prec),
-                            "rec": float(rec),
+                            "comb": float(m["comb"]),
+                            "f1": float(m["f1"]),
+                            "dice": float(m["dice"]),
+                            "prec": float(m["prec"]),
+                            "rec": float(m["rec"]),
                             "thr": float(thr),
                             "med": int(med),
                             "mind": float(mind),
