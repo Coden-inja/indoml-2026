@@ -91,8 +91,14 @@ def main():
     print("=" * 70)
 
     if not test_dir.exists():
-        # Fallback check in parent or kaggle working
-        for cand_test in [Path("/kaggle/working/test_audio"), Path("/kaggle/working/input_data"), Path("test_audio"), Path("input_data")]:
+        # Fallback check in parent, kaggle working, or colab content
+        for cand_test in [
+            Path("/content/test_audio"),
+            Path("/kaggle/working/test_audio"),
+            Path("/kaggle/working/input_data"),
+            Path("test_audio"),
+            Path("input_data"),
+        ]:
             if cand_test.exists():
                 test_dir = cand_test
                 break
@@ -115,6 +121,9 @@ def main():
 
     # Check candidates
     for cand in [
+        Path("/content") / ckpt_path.name,
+        Path("/content/t1_wavlm.pt"),
+        Path("/content/t1_wavlm.zip"),
         Path("/kaggle/working") / ckpt_path.name,
         Path("/kaggle/working/t1_wavlm.pt"),
         Path("/kaggle/working/t1_wavlm_best.pt"),
@@ -130,27 +139,29 @@ def main():
                 print(f"[WARN] Removing corrupt/stale checkpoint: {cand}")
                 cand.unlink()
 
-    # If checkpoint is extracted as a directory in /kaggle/input (e.g. from Kaggle dataset upload)
+    # If checkpoint is extracted as a directory (in /kaggle/input or /content)
     if not ckpt_path.exists() or ckpt_path.is_dir() or not is_valid_torch_file(ckpt_path):
-        input_root = Path("/kaggle/input")
-        if input_root.exists():
-            data_pkls = list(input_root.rglob("data.pkl"))
-            if data_pkls:
-                model_dir = data_pkls[0].parent
-                print(f"[INFO] Detected unzipped checkpoint directory at: {model_dir}")
-                print(f"[INFO] Packaging into /kaggle/working/t1_wavlm.pt...")
-                import shutil
-                cand_zip = Path("/kaggle/working/t1_wavlm.zip")
-                cand_pt = Path("/kaggle/working/t1_wavlm.pt")
-                if cand_pt.exists():
-                    cand_pt.unlink()
-                if cand_zip.exists():
-                    cand_zip.unlink()
-                # PyTorchFileReader expects the internal paths to start with 't1_wavlm/'
-                shutil.make_archive("/kaggle/working/t1_wavlm", "zip", root_dir=str(model_dir.parent), base_dir=model_dir.name)
-                if cand_zip.exists():
-                    cand_zip.rename(cand_pt)
-                ckpt_path = cand_pt
+        for input_root in [Path("/kaggle/input"), Path("/content")]:
+            if input_root.exists():
+                data_pkls = [p for p in input_root.rglob("data.pkl") if "sample_data" not in str(p)]
+                if data_pkls:
+                    model_dir = data_pkls[0].parent
+                    print(f"[INFO] Detected unzipped checkpoint directory at: {model_dir}")
+                    print(f"[INFO] Packaging into t1_wavlm.pt...")
+                    import shutil
+                    work_dir = Path("/content") if Path("/content").exists() else Path("/kaggle/working")
+                    cand_zip = work_dir / "t1_wavlm.zip"
+                    cand_pt = work_dir / "t1_wavlm.pt"
+                    if cand_pt.exists():
+                        cand_pt.unlink()
+                    if cand_zip.exists():
+                        cand_zip.unlink()
+                    # PyTorchFileReader expects the internal paths to start with 't1_wavlm/'
+                    shutil.make_archive(str(work_dir / "t1_wavlm"), "zip", root_dir=str(model_dir.parent), base_dir=model_dir.name)
+                    if cand_zip.exists():
+                        cand_zip.rename(cand_pt)
+                    ckpt_path = cand_pt
+                    break
 
     if not ckpt_path.exists():
         print(f"[ERROR] Checkpoint not found: {ckpt_path.resolve()}")
