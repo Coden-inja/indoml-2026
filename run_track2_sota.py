@@ -73,7 +73,51 @@ def read_audio(p: Path, target_sr: int = TARGET_SR) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# 1. SOTA DeepFilterNet Enhancer Wrapper
+# 1. SOTA SpeechBrain MetricGAN+ Enhancer (Pure PyTorch & Hugging Face, Native 16 kHz)
+# ---------------------------------------------------------------------------
+class SpeechBrainEnhancer:
+    """SOTA SpeechBrain MetricGAN+ Speech Enhancer on Hugging Face.
+
+    Trained specifically for speech enhancement at 16 kHz.
+    Pure PyTorch, zero Rust/C++ compilation, installs via `pip install speechbrain`.
+    """
+
+    def __init__(self, device: str = "cuda"):
+        try:
+            from speechbrain.inference.enhancement import SpectralMaskEnhancement
+            import torch
+
+            print("[INFO] Loading SpeechBrain MetricGAN+ (16 kHz Native) from Hugging Face...")
+            self.model = SpectralMaskEnhancement.from_hparams(
+                source="speechbrain/metricgan-plus-voicebank",
+                savedir="pretrained_models/metricgan-plus-voicebank",
+                run_opts={"device": device},
+            )
+            self.device = device
+            self.torch = torch
+            print(f"[INFO] SpeechBrain MetricGAN+ ready on {device.upper()}!")
+        except ImportError:
+            raise ImportError(
+                "SpeechBrain is not installed! Please run: pip install speechbrain"
+            )
+
+    def enhance_clip(self, wav_16k: np.ndarray) -> np.ndarray:
+        """Enhance mono 16 kHz audio array using MetricGAN+."""
+        tensor = self.torch.from_numpy(wav_16k).unsqueeze(0).to(self.device).float()
+        with self.torch.no_grad():
+            enhanced = self.model.enhance_batch(
+                tensor, lengths=self.torch.tensor([1.0], device=self.device)
+            )
+        out_np = enhanced.squeeze(0).cpu().numpy()
+        if len(out_np) < len(wav_16k):
+            out_np = np.pad(out_np, (0, len(wav_16k) - len(out_np)))
+        else:
+            out_np = out_np[:len(wav_16k)]
+        return out_np.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# 2. DeepFilterNet Enhancer Wrapper
 # ---------------------------------------------------------------------------
 class DeepFilterNetEnhancer:
     """DeepFilterNet3 pre-trained speech enhancer.
@@ -99,6 +143,7 @@ class DeepFilterNetEnhancer:
     def enhance_clip(self, wav_16k: np.ndarray) -> np.ndarray:
         """Enhance mono 16 kHz audio array and return mono 16 kHz array."""
         import librosa
+        import torch
 
         # 1. Resample 16k -> 48k for DeepFilterNet
         if self.df_sr != TARGET_SR:
@@ -131,7 +176,7 @@ class DeepFilterNetEnhancer:
 
 
 # ---------------------------------------------------------------------------
-# 2. High-Quality Fallback Enhancer (Spectral Subtraction / Wiener Filter)
+# 3. High-Quality Fallback Enhancer (Spectral Subtraction / Wiener Filter)
 # ---------------------------------------------------------------------------
 class FallbackSpectralEnhancer:
     """Robust fallback denoiser using multi-band spectral gating."""
@@ -291,8 +336,9 @@ def main():
                         help="'gated' (clean only detected noise spans) or 'full' (clean entire clip)")
     parser.add_argument("--blend", type=float, default=0.85,
                         help="Blend factor: y = blend*clean + (1-blend)*noisy (default: 0.85)")
-    parser.add_argument("--enhancer", type=str, default="deepfilternet", choices=["deepfilternet", "spectral"],
-                        help="Enhancer engine: 'deepfilternet' (SOTA) or 'spectral' (fallback)")
+    parser.add_argument("--enhancer", type=str, default="speechbrain",
+                        choices=["speechbrain", "deepfilternet", "spectral"],
+                        help="Enhancer engine: 'speechbrain' (SOTA HF MetricGAN+, recommended), 'deepfilternet', or 'spectral' (fallback)")
     parser.add_argument("--output-dir", type=str, default="t2_enhanced_wavs",
                         help="Directory to store enhanced WAV files")
     parser.add_argument("--output-zip", type=str, default="submission_track2.zip",
@@ -364,13 +410,23 @@ def main():
 
     # 3. Initialize Enhancer
     enhancer = None
-    if args.enhancer == "deepfilternet":
+    if args.enhancer == "speechbrain":
         try:
-            enhancer = DeepFilterNetEnhancer()
-        except ImportError as e:
-            print(f"[WARN] {e}")
+            enhancer = SpeechBrainEnhancer(device=device)
+        except Exception as e:
+            print(f"[WARN] SpeechBrain failed to load: {e}")
             print("[INFO] Falling back to Spectral Gating...")
             enhancer = FallbackSpectralEnhancer()
+    elif args.enhancer == "deepfilternet":
+        try:
+            enhancer = DeepFilterNetEnhancer()
+        except Exception as e:
+            print(f"[WARN] DeepFilterNet failed to load: {e}")
+            print("[INFO] Falling back to SpeechBrain...")
+            try:
+                enhancer = SpeechBrainEnhancer(device=device)
+            except Exception:
+                enhancer = FallbackSpectralEnhancer()
     else:
         enhancer = FallbackSpectralEnhancer()
 
