@@ -287,11 +287,11 @@ def main():
     parser = argparse.ArgumentParser(description="Package Synapse Track 2 material submission ZIP")
     parser.add_argument("--ckpt", type=str, required=True,
                         help="Path to t2_masknet_best.pt (download from Kaggle /kaggle/working/t2_masknet_best.pt)")
-    parser.add_argument("--phone", type=str, default="",
+    parser.add_argument("--phone", type=str, default="6290102870",
                         help="Primary contact mobile number (required in README)")
-    parser.add_argument("--email", type=str, default="fbyogesh111@gmail.com",
+    parser.add_argument("--email", type=str, default="dutta.arunima.2005@gmail.com",
                         help="Primary contact email")
-    parser.add_argument("--author", type=str, default="",
+    parser.add_argument("--author", type=str, default="Arunima Dutta",
                         help="Primary contact name")
     parser.add_argument("--pred", type=str, default=str(ROOT / "predictions.jsonl"),
                         help="Track-1 predictions.jsonl used for gating")
@@ -304,7 +304,7 @@ def main():
 
     phone = args.phone.strip()
     email = args.email.strip()
-    author = args.author.strip() or "Yogesh Kumar"
+    author = args.author.strip() or "Arunima Dutta"
 
     build = ROOT / TEAM
     if build.exists():
